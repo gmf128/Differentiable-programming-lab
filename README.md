@@ -1,4 +1,8 @@
-# loma
+# Differentiable programing lab
+
+## loma
+
+**Forked from https://github.com/BachiLi/loma_public.git**
 
 This is an educational compiler/programming language for differentiable programming, used for the course [CSE 291](https://cseweb.ucsd.edu/~tzli/cse291/) in UCSD.
 
