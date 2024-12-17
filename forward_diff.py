@@ -78,11 +78,15 @@ def terminal_func_calls(func_id):
         return (val, dval)
 
     def Dfloat2int(input):
-        input_x = input[0]
-        x = loma_ir.StructAccess(input_x, 'val')
-        dx = loma_ir.StructAccess(input_x, 'dval')
-        val = loma_ir.Call('float2int',[x])
-        dval = loma_ir.ConstFloat(0)
+        x = input
+        val = loma_ir.Call('float2int',[x], t=loma_ir.Int())
+        dval = loma_ir.ConstFloat(0.0)
+        return (val, dval)
+
+    def Dint2float(input):
+        x = input
+        val = loma_ir.Call('int2float',[x], t=loma_ir.Float())
+        dval = loma_ir.ConstFloat(0.0)
         return (val, dval)
 
     dfunc_dict = {}
@@ -93,6 +97,7 @@ def terminal_func_calls(func_id):
     dfunc_dict['exp'] = Dexp
     dfunc_dict['sqrt'] = Dsqrt
     dfunc_dict['float2int'] = Dfloat2int
+    dfunc_dict['int2float'] = Dint2float
 
     if func_id not in dfunc_dict.keys():
         raise NotImplementedError
@@ -166,7 +171,7 @@ def forward_diff(diff_func_id : str,
             # Important: mutate_stmt can return a list of statements. We need to flatten the list.
             new_body = irmutator.flatten(new_body)
             #
-            new_ret_type = structs['_dfloat']
+            new_ret_type = loma_to_diff_type(node.ret_type, diff_structs)
             fwd_func_id = func_to_fwd[node.id]
             lineno = funcs[fwd_func_id].lineno
 
@@ -181,26 +186,37 @@ def forward_diff(diff_func_id : str,
         def mutate_return(self, node):
             # HW1:
             # return expr
-            # assemble the results of expr by building a loma_ir.Call to make__dfloat, with the primal and differential expressions being the two arguments.
-            val, dval = self.mutate_expr(node.val)
-            ret = loma_ir.Call("make__dfloat", [val, dval])
-            return loma_ir.Return(ret, lineno = node.lineno)
+            # ret type int:
+            # ret type float: assemble the results of expr by building a loma_ir.Call to make__dfloat, with the primal and differential expressions being the two arguments.
+            match func.ret_type:
+                case loma_ir.Int():
+                    val, dval = self.mutate_expr(node.val)
+                    return loma_ir.Return(val, lineno=node.lineno)
+                case _:
+                    val, dval = self.mutate_expr(node.val)
+                    ret = loma_ir.Call("make__dfloat", [val, dval])
+                    return loma_ir.Return(ret, lineno=node.lineno)
 
         def mutate_declare(self, node):
             # HW1:
             # Declare (string target, type t, expr* val)
             target = node.target
             diff_t = loma_to_diff_type(node.t, diff_structs)
-            if node.val is None:
-                return loma_ir.Declare(target, diff_t, None, lineno=node.lineno)
-            else:
-                val, dval = self.mutate_expr(node.val)
-                ret_val = loma_ir.Call("make__dfloat", [val, dval])
-                return loma_ir.Declare( \
-                    target,
-                    diff_t,
-                    ret_val,
-                    lineno=node.lineno)
+            match diff_t:
+                case loma_ir.Int():
+                    val, dval = self.mutate_expr(node.val)
+                    return loma_ir.Declare(target, diff_t, val, lineno=node.lineno)
+                case _:
+                    if node.val is None:
+                        return loma_ir.Declare(target, diff_t, None, lineno=node.lineno)
+                    else:
+                        val, dval = self.mutate_expr(node.val)
+                        ret_val = loma_ir.Call("make__dfloat", [val, dval])
+                        return loma_ir.Declare( \
+                            target,
+                            diff_t,
+                            ret_val,
+                            lineno=node.lineno)
         def mutate_assign(self, node):
             # HW1:
             # expr target = expr val
@@ -225,14 +241,19 @@ def forward_diff(diff_func_id : str,
         def mutate_const_int(self, node):
             # HW1:
             # (val, 0)
-            return (node, loma_ir.ConstInt(0))
+            return (node, loma_ir.ConstFloat(0.0))
 
         def mutate_var(self, node):
             # HW1:
             # Mutate a Variable, and return the tuple (val, dval), we need to use loma_ir.StructAccess to get the member variable(val & dval)
-            val = loma_ir.StructAccess(node, 'val', lineno=node.lineno)
-            dval = loma_ir.StructAccess(node, 'dval', lineno=node.lineno)
-            return (val, dval)
+            match node.t:
+                # for integers, return (int, 0)
+                case loma_ir.Int():
+                    return (node, loma_ir.ConstFloat(0.0))
+                case _:
+                    val = loma_ir.StructAccess(node, 'val', lineno=node.lineno)
+                    dval = loma_ir.StructAccess(node, 'dval', lineno=node.lineno)
+                    return (val, dval)
 
         def mutate_array_access(self, node):
             # HW1: TODO
@@ -353,11 +374,19 @@ def forward_diff(diff_func_id : str,
             # before: y = f(x)
             # after: (y.val, y.dval) = Df(x.val, x.dval);
             func_id = node.id
-            def mutate_arg(arg):
-                val, dval = self.mutate_expr(arg)
-                return loma_ir.Call("make__dfloat", [val, dval])
-            diff_args = [mutate_arg(arg) for arg in node.args]
             diff_func = terminal_func_calls(func_id)
-            return diff_func(diff_args)
+            match func_id:
+                case "int2float":
+                    val, dval = self.mutate_expr(node.args[0])
+                    return diff_func(val)
+                case "float2int":
+                    val, dval = self.mutate_expr(node.args[0])
+                    return diff_func(val)
+                case _:
+                    def mutate_arg(arg):
+                        val, dval = self.mutate_expr(arg)
+                        return loma_ir.Call("make__dfloat", [val, dval])
+                    diff_args = [mutate_arg(arg) for arg in node.args]
+                    return diff_func(diff_args)
 
     return FwdDiffMutator().mutate_function_def(func)
