@@ -192,9 +192,13 @@ def forward_diff(diff_func_id : str,
                 case loma_ir.Int():
                     val, dval = self.mutate_expr(node.val)
                     return loma_ir.Return(val, lineno=node.lineno)
-                case _:
+                case loma_ir.Float():
                     val, dval = self.mutate_expr(node.val)
                     ret = loma_ir.Call("make__dfloat", [val, dval])
+                    return loma_ir.Return(ret, lineno=node.lineno)
+                case _:
+                    # ret type Structures
+                    ret = self.mutate_expr(node.val)[0]
                     return loma_ir.Return(ret, lineno=node.lineno)
 
         def mutate_declare(self, node):
@@ -202,11 +206,11 @@ def forward_diff(diff_func_id : str,
             # Declare (string target, type t, expr* val)
             target = node.target
             diff_t = loma_to_diff_type(node.t, diff_structs)
-            match diff_t:
+            match node.t:
                 case loma_ir.Int():
                     val, dval = self.mutate_expr(node.val)
                     return loma_ir.Declare(target, diff_t, val, lineno=node.lineno)
-                case _:
+                case loma_ir.Float():
                     if node.val is None:
                         return loma_ir.Declare(target, diff_t, None, lineno=node.lineno)
                     else:
@@ -217,12 +221,36 @@ def forward_diff(diff_func_id : str,
                             diff_t,
                             ret_val,
                             lineno=node.lineno)
+                case _:
+                    # Structures
+                    if node.val is None:
+                        return loma_ir.Declare(target, diff_t, None, lineno=node.lineno)
+                    return loma_ir.Declare( \
+                        target,
+                        diff_t,
+                        val=self.mutate_expr(node.val)[0],
+                        lineno=node.lineno)
         def mutate_assign(self, node):
             # HW1:
             # expr target = expr val
-            target = node.target
+            match node.target:
+                # FIXME ugly, any better resolution?
+                case loma_ir.ArrayAccess():
+                    target = loma_ir.ArrayAccess( \
+                        self.mutate_expr(node.target.array)[0],
+                        self.mutate_expr(node.target.index)[0],
+                        lineno=node.lineno,
+                        t=loma_to_diff_type(node.target.t, diff_structs))
+
+                case _:
+                    target = node.target
             val, dval = self.mutate_expr(node.val)
-            ret_val = loma_ir.Call("make__dfloat", [val, dval])
+            if node.target.t == loma_ir.Int():
+                return loma_ir.Assign(target, val, lineno=node.lineno)
+            elif node.target.t == loma_ir.Float():
+                ret_val = loma_ir.Call("make__dfloat", [val, dval])
+            else:
+                ret_val = val
             return loma_ir.Assign(target, ret_val, lineno=node.lineno)
 
         def mutate_ifelse(self, node):
@@ -250,18 +278,55 @@ def forward_diff(diff_func_id : str,
                 # for integers, return (int, 0)
                 case loma_ir.Int():
                     return (node, loma_ir.ConstFloat(0.0))
-                case _:
+                # for arrays, no nothing
+                case loma_ir.Array():
+                    return (node, None)
+                case loma_ir.Float():
                     val = loma_ir.StructAccess(node, 'val', lineno=node.lineno)
                     dval = loma_ir.StructAccess(node, 'dval', lineno=node.lineno)
                     return (val, dval)
+                case _:
+                    return (node, None)
 
         def mutate_array_access(self, node):
-            # HW1: TODO
-            return super().mutate_array_access(node)
+            # HW1:
+            match node.t:
+                case loma_ir.Int():
+                    return (loma_ir.ArrayAccess(self.mutate_expr(node.array)[0], self.mutate_expr(node.index)[0],
+                                               lineno=node.lineno, t=node.t),
+                            loma_ir.ConstFloat(0.0))
+                case loma_ir.Float():
+                    item = loma_ir.ArrayAccess( \
+                        self.mutate_expr(node.array)[0],
+                        self.mutate_expr(node.index)[0],
+                        lineno=node.lineno,
+                        t=loma_to_diff_type(node.t, diff_structs))
+                    val = loma_ir.StructAccess(item, 'val', lineno=node.lineno)
+                    dval = loma_ir.StructAccess(item, 'dval', lineno=node.lineno)
+                    return (val, dval)
+                case _:
+                    return (node, None)
 
         def mutate_struct_access(self, node):
             # HW1: TODO
-            return super().mutate_struct_access(node)
+            item = loma_ir.StructAccess( \
+                self.mutate_expr(node.struct)[0],
+                node.member_id,
+                lineno=node.lineno,
+                t=loma_to_diff_type(node.t, diff_structs))
+            match item.t:
+                case loma_ir.Int():
+                    return (item, loma_ir.ConstFloat(0.0))
+                case loma_ir.Struct():
+                    if item.t.id == '_dfloat':
+                        val = loma_ir.StructAccess(item, 'val', lineno=node.lineno)
+                        dval = loma_ir.StructAccess(item, 'dval', lineno=node.lineno)
+                        return (val, dval)
+                    else:
+                        return (item, None)
+                case _:
+                    return (item, None)
+
 
         def mutate_add(self, node):
             # HW1:
