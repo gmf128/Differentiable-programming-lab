@@ -253,6 +253,24 @@ def reverse_diff(diff_func_id : str,
                 case _:
                     assert False, f'Visitor error: unhandled statement {node}'
 
+        def mutate_assign(self, node):
+            # In reverse mode, assign is a rather hard stmt to implement, due to the **side effect**, which means the value of variable is changed
+            # Example: def f(x, y){ z; z = x + y; z = z * x + z * y; return z}
+            # For the sake of clarity, we first number these same zs: def f(x, y){ z0; z0 = x + y; z1 = z0 * x + z0 * y; return z1}
+            # In reverse mode, we will update the adjoints: {dz1 += dreturn; dx += z0 * dz1; dz0 += x * dz1; dy += z0 * dz1; dz0 += y * dz1; dx += dz0; dy += dz0;}
+            # If we don`t distinguish the same variable, then we need to use tmp variable to avoid bugs caused by overwritting
+            # {
+            #   z; dz; stack; stack.push(z); z = x + y; stack.push(z); z = z * x + z * y; return z; //primary
+            #   dz += dreturn; | tmp1 = 0; z = stack.pop(); dx += z * dz; tmp1 += x * dz; dy += z * dz; tmp1+= y * dz; dz = tmp1; | dx += dz; dy += dz;
+            #       }
+
+            # Stack manipulation happens only when overwriting; Stack size is equal to the number of assignment statements(every assignment stmt is overwriting, otherwise it is a declare stmt)
+            # Push the old value into stack before assignment statement in Primary Period
+            # and pop the value before the assignment in Adjoint Period
+            res = []
+
+            return super().mutate_assign(node)
+
     class RevDiffMutator(irmutator.IRMutator):
         def mutate_function_def(self, node):
             # HW2:
