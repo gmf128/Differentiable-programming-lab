@@ -5,6 +5,7 @@ import irmutator
 import autodiff
 import string
 import random
+import irvisitor
 
 # From https://stackoverflow.com/questions/2257441/random-string-generation-with-upper-case-letters-and-digits
 def random_id_generator(size=6, chars=string.ascii_lowercase + string.ascii_uppercase + string.digits):
@@ -223,18 +224,97 @@ def reverse_diff(diff_func_id : str,
     # reverse differentiation.
 
     # Apply the differentiation.
+    class PrimalBuildMutator(irmutator.IRMutator):
+        def __init__(self):
+            super().__init__()
+        def mutate_function_def(self, node):
+            self.adjoint_id_dict = {}
+            primary_code = [self.mutate_stmt(stmt) for stmt in node.body]
+            # Important: mutate_stmt can return a list of statements. We need to flatten the list.
+            primary_code = irmutator.flatten(primary_code)
+            return [primary_code, self.adjoint_id_dict]
+        def mutate_declare(self, node):
+            # First, we need to generate z as primal code, and declare the adjoint value _dz
+            res = []
+            res.append(node)  # primal
+            id = node.target
+            adjoint_id = f"_d{id}_{random_id_generator()}"
+            self.adjoint_id_dict[id] = adjoint_id
+            res.append(loma_ir.Declare(adjoint_id, t=node.t))
+            return res
+        def mutate_stmt(self, node):
+            match node:
+                case loma_ir.Return():
+                    return []
+                case loma_ir.Declare():
+                    return self.mutate_declare(node)
+                case loma_ir.Assign():
+                    return self.mutate_assign(node)
+                case _:
+                    assert False, f'Visitor error: unhandled statement {node}'
+
     class RevDiffMutator(irmutator.IRMutator):
         def mutate_function_def(self, node):
-            # HW2: TODO
-            return super().mutate_function_def(node)
+            # HW2:
+            # FunctionDef(string id, arg* args, stmt* body, bool is_simd, type? ret_type)
+
+            new_args = []
+            adjoint_id_dict = {}
+            for arg in node.args:
+                new_args.append(arg)
+                if arg.i == loma_ir.In():
+                    adjoint_id = f"_d{arg.id}_{random_id_generator()}"
+                    adjoint_arg = loma_ir.Arg(id=adjoint_id, t=arg.t, i=loma_ir.Out())
+                    adjoint_id_dict[arg.id] = adjoint_id
+                    new_args.append(adjoint_arg)
+            if node.ret_type == loma_ir.Float():
+                d_return_id = f"_dreturn_{random_id_generator()}"
+                d_return = loma_ir.Arg(id=d_return_id, t=loma_ir.Float(), i=loma_ir.In())
+                new_args.append(d_return)
+                self.adjoint = loma_ir.Var(d_return_id)
+            else:
+                raise NotImplementedError("Function ret type which is not float has not been implemented yet")
+            self.adjoint_id_dict = adjoint_id_dict
+            new_args = tuple(new_args)
+            # Primary mode: Declare intermediate variables
+            primary_mutator = PrimalBuildMutator()
+            primary_code, declare_dict = primary_mutator.mutate_function_def(node)
+            for key in declare_dict.keys():
+                self.adjoint_id_dict[key] = declare_dict[key]
+            # Reverse mode: We have to visit the stmts reversely
+            new_body = [self.mutate_stmt(stmt) for stmt in reversed(node.body)]
+            # Important: mutate_stmt can return a list of statements. We need to flatten the list.
+            new_body = primary_code + irmutator.flatten(new_body)
+            #
+            new_ret_type = None
+            rev_func_id = func_to_rev[node.id]
+            lineno = funcs[rev_func_id].lineno
+
+            return loma_ir.FunctionDef( \
+                diff_func_id,
+                new_args,
+                new_body,
+                node.is_simd,
+                new_ret_type,
+                lineno=lineno)
 
         def mutate_return(self, node):
-            # HW2: TODO
-            return super().mutate_return(node)
+            # HW2:
+            # mutate_return should back-propagate d_return to the expr in return statement
+            assert self.adjoint is not None
+            return self.mutate_expr(node.val)
 
         def mutate_declare(self, node):
-            # HW2: TODO
-            return super().mutate_declare(node)
+            # HW2:
+            # Declare means we have a new variable now, which is a new node in the computing graph
+            #
+            #   x <---
+            #         |-- 'f' <-- _dz ---(z=f(x, y))
+            #   y <---
+            self.adjoint = loma_ir.Var(self.adjoint_id_dict[node.target])
+            if node.val is None:
+                return []
+            return self.mutate_expr(node.val)
 
         def mutate_assign(self, node):
             # HW2: TODO
@@ -253,16 +333,24 @@ def reverse_diff(diff_func_id : str,
             return super().mutate_while(node)
 
         def mutate_const_float(self, node):
-            # HW2: TODO
-            return super().mutate_const_float(node)
+            # HW2:
+            # Constants do not require grads, so, mutate_const_** just does nothing.
+            return []
 
         def mutate_const_int(self, node):
-            # HW2: TODO
-            return super().mutate_const_int(node)
+            # HW2:
+            # Constants do not require grads, so, mutate_const_** just does nothing.
+            return []
 
         def mutate_var(self, node):
-            # HW2: TODO
-            return super().mutate_var(node)
+            # HW2:
+            # When mutate_var is called, it means that adjoint value has been propagated to the variable, and we have to update the d_var
+            # dx += adjoint
+            if node.id in self.adjoint_id_dict.keys():
+                # which means the variable requires grad
+                d_var_id = self.adjoint_id_dict[node.id]
+                d_var_update = loma_ir.Assign(target=loma_ir.Var(d_var_id), val=loma_ir.BinaryOp(loma_ir.Add(), loma_ir.Var(d_var_id), self.adjoint))
+            return [d_var_update]
 
         def mutate_array_access(self, node):
             # HW2: TODO
@@ -273,20 +361,55 @@ def reverse_diff(diff_func_id : str,
             return super().mutate_struct_access(node)
 
         def mutate_add(self, node):
-            # HW2: TODO
-            return super().mutate_add(node)
+            # HW2:
+            #   expr1 <-delta--
+            #                  |-- '+' <--delta-- res
+            #   expr2 <-delta--
+            return self.mutate_expr(node.left) + self.mutate_expr(node.right)
 
         def mutate_sub(self, node):
-            # HW2: TODO
-            return super().mutate_sub(node)
+            # HW2:
+            #   expr1 <---delta-----
+            #                       |-- '-' <--delta-- res
+            #   expr2 <-minus delta--
+            res = []
+            res += self.mutate_expr(node.left)
+            tmp_adjoint = self.adjoint
+            self.adjoint = loma_ir.BinaryOp(loma_ir.Sub(), loma_ir.ConstFloat(0.0), self.adjoint)
+            res += self.mutate_expr(node.right)
+            self.adjoint = tmp_adjoint
+            return res
 
         def mutate_mul(self, node):
-            # HW2: TODO
-            return super().mutate_mul(node)
+            # HW2:
+            #   expr1 <--delta*expr2-
+            #                        |-- '*' <--delta-- res
+            #   expr2 <--delta*expr1-
+            res = []
+            tmp_adjoint = self.adjoint
+            self.adjoint = loma_ir.BinaryOp(loma_ir.Mul(), tmp_adjoint, node.right)
+            res += self.mutate_expr(node.left)
+            self.adjoint = loma_ir.BinaryOp(loma_ir.Mul(), tmp_adjoint, node.left)
+            res += self.mutate_expr(node.right)
+            self.adjoint = tmp_adjoint
+            return res
 
         def mutate_div(self, node):
-            # HW2: TODO
-            return super().mutate_div(node)
+            # HW2:
+            #   expr1 <-  delta / expr2---------
+            #                                   |-- '/' <--d-- res
+            #   expr2 <-(-expr1 / sqr(expr2))*d-
+            res = []
+            tmp_adjoint = self.adjoint
+            self.adjoint = loma_ir.BinaryOp(loma_ir.Div(), tmp_adjoint, node.right)
+            res += self.mutate_expr(node.left)
+            y_sqr = loma_ir.BinaryOp(loma_ir.Mul(), node.right, node.right)
+            frac = loma_ir.BinaryOp(loma_ir.Div(), node.left, y_sqr)
+            d_out_d_y = loma_ir.BinaryOp(loma_ir.Sub(), loma_ir.ConstFloat(0.0), frac)
+            self.adjoint = loma_ir.BinaryOp(loma_ir.Mul(), tmp_adjoint, d_out_d_y)
+            res += self.mutate_expr(node.right)
+            self.adjoint = tmp_adjoint
+            return res
 
         def mutate_call(self, node):
             # HW2: TODO
