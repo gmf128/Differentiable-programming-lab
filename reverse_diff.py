@@ -588,7 +588,61 @@ def reverse_diff(diff_func_id : str,
             return res
 
         def mutate_call(self, node):
-            # HW2: TODO
-            return super().mutate_call(node)
+            # HW2:
+            res = []
+            tmp_adjoint = self.adjoint
+            func_id = node.id
+            match func_id:
+                case "sin":
+                    #   x  <--delta * cos(x)-- 'sin' <--delta-- y
+                    self.adjoint = loma_ir.BinaryOp(loma_ir.Mul(), tmp_adjoint, loma_ir.Call('cos', node.args))
+                    res += [self.mutate_expr(arg) for arg in node.args]
+                    self.adjoint = tmp_adjoint
+                case "cos":
+                    #   x  <--minus delta * sin(x)-- 'cos' <--delta-- y
+                    dsin = loma_ir.BinaryOp(loma_ir.Mul(), tmp_adjoint, loma_ir.Call('sin', node.args))
+                    self.adjoint = loma_ir.BinaryOp(loma_ir.Sub(), loma_ir.ConstFloat(0.0), dsin)
+                    res += [self.mutate_expr(arg) for arg in node.args]
+                    self.adjoint = tmp_adjoint
+                case "sqrt":
+                    #   x  <-- delta / (2 * y)-- 'sqrt' <--delta-- y
+                    self.adjoint = loma_ir.BinaryOp(loma_ir.Div(), tmp_adjoint,
+                                                    loma_ir.BinaryOp(loma_ir.Add(), node, node))
+                    res += [self.mutate_expr(arg) for arg in node.args]
+                    self.adjoint = tmp_adjoint
+                case "exp":
+                    #   x  <-- delta * y -- 'exp' <--delta-- y
+                    self.adjoint = loma_ir.BinaryOp(loma_ir.Mul(), tmp_adjoint,
+                                                    node)
+                    res += [self.mutate_expr(arg) for arg in node.args]
+                    self.adjoint = tmp_adjoint
+                case "log":
+                    #   x  <-- delta / x -- 'log' <--delta-- y
+                    self.adjoint = loma_ir.BinaryOp(loma_ir.Div(), tmp_adjoint,
+                                                    node.args[0])
+                    res += [self.mutate_expr(arg) for arg in node.args]
+                    self.adjoint = tmp_adjoint
+                case "pow":
+                    #   x <-  delta * y * x^(y-1)-------
+                    #                                   |-- 'pow' <--d-- x^y
+                    #   y <-  delta * x^y * log(x) -----
+                    x = node.args[0]
+                    y = node.args[1]
+                    x_pow_y_minus_one = loma_ir.Call('pow', [x, loma_ir.BinaryOp(loma_ir.Sub(), y, loma_ir.ConstInt(1))])
+                    partial_x = loma_ir.BinaryOp(loma_ir.Mul(), y, x_pow_y_minus_one)
+                    self.adjoint = loma_ir.BinaryOp(loma_ir.Mul(), tmp_adjoint, partial_x)
+                    res += self.mutate_expr(x)
+                    logx = loma_ir.Call('log', [x])
+                    partial_y = loma_ir.BinaryOp(loma_ir.Mul(), node, logx)
+                    self.adjoint = loma_ir.BinaryOp(loma_ir.Mul(), tmp_adjoint, partial_y)
+                    res += self.mutate_expr(y)
+
+                    self.adjoint = tmp_adjoint
+
+                case _:
+                    raise NotImplementedError(f"{func_id} is not implemented yet")
+
+            return res
+
 
     return RevDiffMutator().mutate_function_def(func)
