@@ -227,8 +227,9 @@ def reverse_diff(diff_func_id : str,
     class PrimalBuildMutator(irmutator.IRMutator):
         def __init__(self):
             super().__init__()
-        def mutate_function_def(self, node):
+            self.overwrite_dict = {}
             self.adjoint_id_dict = {}
+        def mutate_function_def(self, node):
             primary_code = [self.mutate_stmt(stmt) for stmt in node.body]
             # Important: mutate_stmt can return a list of statements. We need to flatten the list.
             primary_code = irmutator.flatten(primary_code)
@@ -268,10 +269,54 @@ def reverse_diff(diff_func_id : str,
             # Push the old value into stack before assignment statement in Primary Period
             # and pop the value before the assignment in Adjoint Period
             res = []
+            # stack name: _tmp_stack_{typename}
+            # stack ptr: _stack_ptr_{typename}
+            target_type = self.mutate_expr(node.target)
+            type_name = type_to_string(target_type)
+            stack_name = f"_tmp_stack_{type_name}"
+            stack_ptr_name = f"_stack_ptr_{type_name}"
+            if type_name in self.overwrite_dict.keys():
+                self.overwrite_dict[type_name]['count'] += 1
+            else:
+                self.overwrite_dict[type_name] = {'type': target_type, 'count': 1}
+            stack_access = loma_ir.ArrayAccess(loma_ir.Var(stack_name), loma_ir.Var(stack_ptr_name), t=target_type)
+            # Push the target into the stack
+            res.append(loma_ir.Assign(stack_access, node.target))
+            # Primary code
+            res.append(node)
+            # Advance stack pointer
+            res.append(loma_ir.Assign(loma_ir.Var(stack_ptr_name),
+                                      loma_ir.BinaryOp(loma_ir.Add(), loma_ir.Var(stack_ptr_name), loma_ir.ConstInt(1))))
 
-            return super().mutate_assign(node)
+            return res
+
+        def mutate_expr(self, node):
+            match node:
+                case loma_ir.Var():
+                    return node.t
+                case loma_ir.ArrayAccess():
+                    return node.t
+                case loma_ir.StructAccess():
+                    return node.t
+                case loma_ir.ConstFloat():
+                    raise AssertionError("Constant cannot be lvalue")
+                case loma_ir.ConstInt():
+                    raise AssertionError("Constant cannot be lvalue")
+                case loma_ir.BinaryOp():
+                    raise AssertionError("Binary Operation cannot be lvalue")
+                case loma_ir.Call():
+                    raise AssertionError("Function call cannot be lvalue")
+                case _:
+                    assert False, f'Visitor error: unhandled expression {node}'
 
     class RevDiffMutator(irmutator.IRMutator):
+        def __init__(self):
+            super().__init__()
+            self.overwrite_dict = {}
+            self.adjoint_id_dict = {}
+            self.overwrite_id = None
+            self.tmp_adjoint_var_names = None
+            self.overwrite_cnt = 0
         def mutate_function_def(self, node):
             # HW2:
             # FunctionDef(string id, arg* args, stmt* body, bool is_simd, type? ret_type)
@@ -296,14 +341,40 @@ def reverse_diff(diff_func_id : str,
             new_args = tuple(new_args)
             # Primary mode: Declare intermediate variables
             primary_mutator = PrimalBuildMutator()
+            self.primary_mutator = primary_mutator
             primary_code, declare_dict = primary_mutator.mutate_function_def(node)
             for key in declare_dict.keys():
                 self.adjoint_id_dict[key] = declare_dict[key]
+            # Important: mutate_stmt can return a list of statements. We need to flatten the list.
+
+            # Declare the overwriting stack
+            overwrite_dict = primary_mutator.overwrite_dict
+            stack_declare_code = []
+            tmp_adjoint_var_num = 0
+            for key in overwrite_dict.keys():
+                declare_stmt = loma_ir.Declare(f"_tmp_stack_{key}", \
+                                               t=loma_ir.Array(t=overwrite_dict[key]['type'],
+                                                               static_size=overwrite_dict[key]['count']))
+                declare_ptr_stmt = loma_ir.Declare(f"_stack_ptr_{key}", t=loma_ir.Int())
+                stack_declare_code.append(declare_stmt)
+                stack_declare_code.append(declare_ptr_stmt)
+                tmp_adjoint_var_num += overwrite_dict[key]['count']
+            # Declare the tmp variables to store _dz
+            self.tmp_adjoint_var_names = []
+            tmp_adjoint_var_declare_code = []
+            for i in range(tmp_adjoint_var_num):
+                tmp_var_name = f"_tmp_adjoint_var_{i}_{random_id_generator()}"
+                self.tmp_adjoint_var_names.append(tmp_var_name)
+                # FIXME: deal with struct and array types
+                tmp_adjoint_var_declare_code.append(loma_ir.Declare(tmp_var_name, t=loma_ir.Float()))
+
             # Reverse mode: We have to visit the stmts reversely
             new_body = [self.mutate_stmt(stmt) for stmt in reversed(node.body)]
-            # Important: mutate_stmt can return a list of statements. We need to flatten the list.
-            new_body = primary_code + irmutator.flatten(new_body)
-            #
+
+            new_body = stack_declare_code + primary_code \
+                       + tmp_adjoint_var_declare_code +irmutator.flatten(new_body)
+
+            self.overwrite_cnt = 0
             new_ret_type = None
             rev_func_id = func_to_rev[node.id]
             lineno = funcs[rev_func_id].lineno
@@ -335,8 +406,50 @@ def reverse_diff(diff_func_id : str,
             return self.mutate_expr(node.val)
 
         def mutate_assign(self, node):
-            # HW2: TODO
-            return super().mutate_assign(node)
+            # HW2:
+            # In reverse mode, assign is a rather hard stmt to implement, due to the **side effect**, which means the value of variable is changed
+            # Example: def f(x, y){ z; z = x + y; z = z * x + z * y; return z}
+            # For the sake of clarity, we first number these same zs: def f(x, y){ z0; z0 = x + y; z1 = z0 * x + z0 * y; return z1}
+            # In reverse mode, we will update the adjoints: {dz1 += dreturn; dx += z0 * dz1; dz0 += x * dz1; dy += z0 * dz1; dz0 += y * dz1; dx += dz0; dy += dz0;}
+            # If we don`t distinguish the same variable, then we need to use tmp variable to avoid bugs caused by overwritting
+            # {
+            #   z; dz; stack; stack.push(z); z = x + y; stack.push(z); z = z * x + z * y; return z; //primary
+            #   dz += dreturn; | tmp1 = 0; z = stack.pop(); dx += z * dz; tmp1 += x * dz; dy += z * dz; tmp1+= y * dz; dz = tmp1; | dx += dz; dy += dz;
+            #       }
+
+            # Stack manipulation happens only when overwriting; Stack size is equal to the number of assignment statements(every assignment stmt is overwriting, otherwise it is a declare stmt)
+            # Push the old value into stack before assignment statement in Primary Period
+            # and pop the value before the assignment in Adjoint Period
+            res = []
+            # Pop the old value
+            target_type = self.primary_mutator.mutate_expr(node.target)
+            id = type_to_string(target_type)
+            # Don`t forget to update stack ptr
+            res.append(loma_ir.Assign(loma_ir.Var(f"_stack_ptr_{id}"),
+                                      loma_ir.BinaryOp(loma_ir.Sub(), loma_ir.Var(f"_stack_ptr_{id}"),
+                                                       loma_ir.ConstInt(1))))
+            stack_pop_stmt = loma_ir.ArrayAccess(loma_ir.Var(f"_tmp_stack_{id}"), loma_ir.Var(f"_stack_ptr_{id}"))
+            res.append(loma_ir.Assign(target=node.target, val=stack_pop_stmt))
+
+            # back_propagate carefully
+            # FIXME: array and struct support
+            if isinstance(node.target, loma_ir.Var):
+                id = node.target.id
+            elif isinstance(node.target, loma_ir.ArrayAccess):
+                id = node.target.array.id
+            elif isinstance(node.target, loma_ir.StructAccess):
+                id = node.target.struct.id
+            self.adjoint = loma_ir.Var(self.adjoint_id_dict[id])
+            self.overwrite_id = id
+            res += self.mutate_expr(node.val)
+
+            # Update adjoint
+            res.append(loma_ir.Assign(loma_ir.Var(self.adjoint_id_dict[id]), loma_ir.Var(self.tmp_adjoint_var_names[self.overwrite_cnt])))
+            self.overwrite_cnt += 1
+            # Destroy the overwrite_id class val since it should not have a value when the stmt is not Assign
+            self.overwrite_id = None
+
+            return res
 
         def mutate_ifelse(self, node):
             # HW3: TODO
@@ -367,6 +480,9 @@ def reverse_diff(diff_func_id : str,
             if node.id in self.adjoint_id_dict.keys():
                 # which means the variable requires grad
                 d_var_id = self.adjoint_id_dict[node.id]
+                # Deal with overwrite properly:
+                if self.overwrite_id is not None and node.id == self.overwrite_id:
+                    d_var_id = self.tmp_adjoint_var_names[self.overwrite_cnt]
                 d_var_update = loma_ir.Assign(target=loma_ir.Var(d_var_id), val=loma_ir.BinaryOp(loma_ir.Add(), loma_ir.Var(d_var_id), self.adjoint))
             return [d_var_update]
 
