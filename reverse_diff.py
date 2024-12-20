@@ -120,6 +120,17 @@ def reverse_diff(diff_func_id : str,
             case _:
                 assert False
 
+    def check_lhs_is_output_arg(lhs, output_args):
+        match lhs:
+            case loma_ir.Var():
+                return lhs.id in output_args
+            case loma_ir.StructAccess():
+                return check_lhs_is_output_arg(lhs.struct, output_args)
+            case loma_ir.ArrayAccess():
+                return check_lhs_is_output_arg(lhs.array, output_args)
+            case _:
+                assert False
+
     # A utility class that you can use for HW3.
     # This mutator normalizes each call expression into
     # f(x0, x1, ...)
@@ -229,11 +240,15 @@ def reverse_diff(diff_func_id : str,
             super().__init__()
             self.overwrite_dict = {}
             self.adjoint_id_dict = {}
+            self.output_args = []
         def mutate_function_def(self, node):
+            for arg in node.args:
+                if arg.i == loma_ir.Out():
+                    self.output_args.append(arg.id)
             primary_code = [self.mutate_stmt(stmt) for stmt in node.body]
             # Important: mutate_stmt can return a list of statements. We need to flatten the list.
             primary_code = irmutator.flatten(primary_code)
-            return [primary_code, self.adjoint_id_dict]
+            return primary_code
         def mutate_declare(self, node):
             # First, we need to generate z as primal code, and declare the adjoint value _dz
             res = []
@@ -269,6 +284,9 @@ def reverse_diff(diff_func_id : str,
             # Push the old value into stack before assignment statement in Primary Period
             # and pop the value before the assignment in Adjoint Period
             res = []
+            # deal with output variable
+            if check_lhs_is_output_arg(node.target, self.output_args):
+                return []
             # stack name: _tmp_stack_{typename}
             # stack ptr: _stack_ptr_{typename}
             target_type = self.mutate_expr(node.target)
@@ -317,6 +335,8 @@ def reverse_diff(diff_func_id : str,
             self.overwrite_id = None
             self.tmp_adjoint_var_names = None
             self.overwrite_cnt = 0
+            self.primary_mutator = None
+            self.output_args = []
         def mutate_function_def(self, node):
             # HW2:
             # FunctionDef(string id, arg* args, stmt* body, bool is_simd, type? ret_type)
@@ -324,10 +344,17 @@ def reverse_diff(diff_func_id : str,
             new_args = []
             adjoint_id_dict = {}
             for arg in node.args:
-                new_args.append(arg)
                 if arg.i == loma_ir.In():
+                    new_args.append(arg)
                     adjoint_id = f"_d{arg.id}_{random_id_generator()}"
                     adjoint_arg = loma_ir.Arg(id=adjoint_id, t=arg.t, i=loma_ir.Out())
+                    adjoint_id_dict[arg.id] = adjoint_id
+                    new_args.append(adjoint_arg)
+                elif arg.i == loma_ir.Out():
+                    # refs out
+                    # Important: No need for new_args.append(arg), we dont need a output variable in reverse mode anymore!
+                    adjoint_id = f"_d{arg.id}_{random_id_generator()}"
+                    adjoint_arg = loma_ir.Arg(id=adjoint_id, t=arg.t, i=loma_ir.In())
                     adjoint_id_dict[arg.id] = adjoint_id
                     new_args.append(adjoint_arg)
             if node.ret_type == loma_ir.Float():
@@ -335,6 +362,8 @@ def reverse_diff(diff_func_id : str,
                 d_return = loma_ir.Arg(id=d_return_id, t=loma_ir.Float(), i=loma_ir.In())
                 new_args.append(d_return)
                 self.adjoint = loma_ir.Var(d_return_id)
+            elif node.ret_type == None:
+                pass
             else:
                 raise NotImplementedError("Function ret type which is not float has not been implemented yet")
             self.adjoint_id_dict = adjoint_id_dict
@@ -342,7 +371,9 @@ def reverse_diff(diff_func_id : str,
             # Primary mode: Declare intermediate variables
             primary_mutator = PrimalBuildMutator()
             self.primary_mutator = primary_mutator
-            primary_code, declare_dict = primary_mutator.mutate_function_def(node)
+            primary_code = primary_mutator.mutate_function_def(node)
+            declare_dict = primary_mutator.adjoint_id_dict
+            self.output_args = primary_mutator.output_args
             for key in declare_dict.keys():
                 self.adjoint_id_dict[key] = declare_dict[key]
             # Important: mutate_stmt can return a list of statements. We need to flatten the list.
@@ -421,6 +452,17 @@ def reverse_diff(diff_func_id : str,
             # Push the old value into stack before assignment statement in Primary Period
             # and pop the value before the assignment in Adjoint Period
             res = []
+            # deal with output variable
+            if check_lhs_is_output_arg(node.target, self.output_args):
+                if isinstance(node.target, loma_ir.Var):
+                    id = node.target.id
+                elif isinstance(node.target, loma_ir.ArrayAccess):
+                    id = node.target.array.id
+                elif isinstance(node.target, loma_ir.StructAccess):
+                    id = node.target.struct.id
+                self.adjoint = loma_ir.Var(self.adjoint_id_dict[id])
+                res += self.mutate_expr(node.val)
+                return res
             # Pop the old value
             target_type = self.primary_mutator.mutate_expr(node.target)
             id = type_to_string(target_type)
