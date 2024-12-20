@@ -461,11 +461,13 @@ def reverse_diff(diff_func_id : str,
             if check_lhs_is_output_arg(node.target, self.output_args):
                 if isinstance(node.target, loma_ir.Var):
                     id = node.target.id
+                    self.adjoint = loma_ir.Var(self.adjoint_id_dict[id])
                 elif isinstance(node.target, loma_ir.ArrayAccess):
                     id = node.target.array.id
+                    self.adjoint = loma_ir.ArrayAccess(loma_ir.Var(self.adjoint_id_dict[id]), node.target.index)
                 elif isinstance(node.target, loma_ir.StructAccess):
+                    raise NotImplementedError("StructAccess as lvalue of Assign has not been implemented yet")
                     id = node.target.struct.id
-                self.adjoint = loma_ir.Var(self.adjoint_id_dict[id])
                 res += self.mutate_expr(node.val)
                 return res
             # Pop the old value
@@ -534,8 +536,17 @@ def reverse_diff(diff_func_id : str,
             return [d_var_update]
 
         def mutate_array_access(self, node):
-            # HW2: TODO
-            return super().mutate_array_access(node)
+            # HW2:
+            # array[index] => _d_array[index]
+            if node.array.id in self.adjoint_id_dict.keys():
+                # which means the variable requires grad
+                d_array_id = self.adjoint_id_dict[node.array.id]
+                index = node.index
+                # Deal with overwrite properly: TODO
+                d_array_access = loma_ir.ArrayAccess(loma_ir.Var(d_array_id), index)
+                d_var_update = loma_ir.Assign(target=d_array_access,
+                                              val=loma_ir.BinaryOp(loma_ir.Add(), d_array_access, self.adjoint))
+            return [d_var_update]
 
         def mutate_struct_access(self, node):
             # HW2: TODO
