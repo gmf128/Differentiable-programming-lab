@@ -364,6 +364,11 @@ def reverse_diff(diff_func_id : str,
                 self.adjoint = loma_ir.Var(d_return_id)
             elif node.ret_type == None:
                 pass
+            elif node.ret_type == loma_ir.Int():
+                d_return_id = f"_dreturn_{random_id_generator()}"
+                d_return = loma_ir.Arg(id=d_return_id, t=loma_ir.Float(), i=loma_ir.In())
+                new_args.append(d_return)
+                self.adjoint = loma_ir.Var(d_return_id)
             else:
                 raise NotImplementedError("Function ret type which is not float has not been implemented yet")
             self.adjoint_id_dict = adjoint_id_dict
@@ -638,7 +643,16 @@ def reverse_diff(diff_func_id : str,
                     res += self.mutate_expr(y)
 
                     self.adjoint = tmp_adjoint
-
+                case "int2float":
+                    tmp_adjoint = self.adjoint
+                    self.adjoint = loma_ir.ConstFloat(0.0)
+                    res += [self.mutate_expr(arg) for arg in node.args]
+                    self.adjoint = tmp_adjoint
+                case "float2int":
+                    tmp_adjoint = self.adjoint
+                    self.adjoint = loma_ir.ConstFloat(0.0)
+                    res += [self.mutate_expr(arg) for arg in node.args]
+                    self.adjoint = tmp_adjoint
                 case _:
                     raise NotImplementedError(f"{func_id} is not implemented yet")
 
