@@ -463,8 +463,25 @@ def reverse_diff(diff_func_id : str,
                     id = node.target.id
                     self.adjoint = loma_ir.Var(self.adjoint_id_dict[id])
                 elif isinstance(node.target, loma_ir.ArrayAccess):
-                    id = node.target.array.id
-                    self.adjoint = loma_ir.ArrayAccess(loma_ir.Var(self.adjoint_id_dict[id]), node.target.index)
+                    # get id
+                    indexes = []
+                    ptr = 0
+                    child = node.target.array
+                    indexes.append(node.target.index)
+                    while isinstance(child, loma_ir.ArrayAccess):
+                        indexes.append(child.index)
+                        ptr += 1
+                        child = child.array
+                    id = child.id
+                    if id in self.adjoint_id_dict.keys():
+                        # which means the variable requires grad
+                        d_array_id = self.adjoint_id_dict[id]
+                        d_array_access = loma_ir.Var(d_array_id)
+                        while ptr >= 0:
+                            d_array_access = loma_ir.ArrayAccess(d_array_access, indexes[ptr])
+                            ptr -= 1
+                    self.adjoint = d_array_access
+
                 elif isinstance(node.target, loma_ir.StructAccess):
                     raise NotImplementedError("StructAccess as lvalue of Assign has not been implemented yet")
                     id = node.target.struct.id
@@ -537,15 +554,28 @@ def reverse_diff(diff_func_id : str,
 
         def mutate_array_access(self, node):
             # HW2:
-            # array[index] => _d_array[index]
-            if node.array.id in self.adjoint_id_dict.keys():
+            # array[index][index2]..[indexN] => _d_array[index][index][index2]..[indexN]
+            # get id
+            indexes = []
+            ptr = 0
+            child = node.array
+            indexes.append(node.index)
+            while isinstance(child, loma_ir.ArrayAccess):
+                indexes.append(child.index)
+                ptr += 1
+                child = child.array
+            id = child.id
+            if id in self.adjoint_id_dict.keys():
                 # which means the variable requires grad
-                d_array_id = self.adjoint_id_dict[node.array.id]
-                index = node.index
-                # Deal with overwrite properly: TODO
-                d_array_access = loma_ir.ArrayAccess(loma_ir.Var(d_array_id), index)
+                d_array_id = self.adjoint_id_dict[id]
+                d_array_access = loma_ir.Var(d_array_id)
+                while ptr >= 0:
+                    d_array_access = loma_ir.ArrayAccess(d_array_access, indexes[ptr])
+                    ptr -= 1
                 d_var_update = loma_ir.Assign(target=d_array_access,
                                               val=loma_ir.BinaryOp(loma_ir.Add(), d_array_access, self.adjoint))
+            else:
+                raise AssertionError
             return [d_var_update]
 
         def mutate_struct_access(self, node):
