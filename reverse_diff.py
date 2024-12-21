@@ -131,6 +131,131 @@ def reverse_diff(diff_func_id : str,
             case _:
                 assert False
 
+    def get_lhs_unique_id(lhs):
+        """
+        A utility function to get lhs`s ID to judge if overwriting happens
+        Input : x => Output: 'x'
+        Input : x[0] => Output: 'x[0]'
+        Input : x.member => Output: 'x.member'
+
+        Parameters
+        ----------
+        lhs
+        adjoint_id_dict: the mapping from var id to _dvar id
+
+        Returns
+        -------
+
+        """
+        if isinstance(lhs, loma_ir.Var):
+            id = lhs.id
+            return id
+        elif isinstance(lhs, loma_ir.ArrayAccess):
+            # get id
+            indexes = []
+            ptr = 0
+            child = lhs.array
+            indexes.append(lhs.index)
+            while isinstance(child, loma_ir.ArrayAccess):
+                indexes.append(child.index)
+                ptr += 1
+                child = child.array
+                t = child.t
+            id = child.id
+
+            while ptr >= 0:
+                id += '['
+                id += str(indexes[ptr])
+                id += ']'
+                ptr -= 1
+            return id
+
+        elif isinstance(lhs, loma_ir.StructAccess):
+            # struct.x.y.z => dstruct.x.y.z
+            # get id
+            members = []
+            ptr = 0
+            child = lhs.struct
+            members.append(lhs.member_id)
+            while isinstance(child, loma_ir.StructAccess):
+                members.append(child.member_id)
+                ptr += 1
+                child = child.struct
+            id = child.id
+
+            while ptr >= 0:
+                id += '.'
+                id += str(members[ptr])
+                ptr -= 1
+
+            return id
+
+    def get_lhs_adjoint_var(lhs, adjoint_id_dict):
+        """
+        A utility function to get adjoint variables from lhs.
+        Input : x => Output: _dx
+        Input : x[0] => Output: _dx[0]
+        Input : x.member => Output: _dx.member
+
+        Parameters
+        ----------
+        lhs
+        adjoint_id_dict: the mapping from var id to _dvar id
+
+        Returns
+        -------
+
+        """
+        if isinstance(lhs, loma_ir.Var):
+            id = lhs.id
+            return loma_ir.Var(adjoint_id_dict[id], t=lhs.t)
+        elif isinstance(lhs, loma_ir.ArrayAccess):
+            # get id
+            indexes = []
+            ptr = 0
+            child = lhs.array
+            indexes.append(lhs.index)
+            t = lhs.t
+            while isinstance(child, loma_ir.ArrayAccess):
+                indexes.append(child.index)
+                ptr += 1
+                child = child.array
+                t = child.t
+            id = child.id
+            if id in adjoint_id_dict.keys():
+                # which means the variable requires grad
+                d_array_id = adjoint_id_dict[id]
+                d_array_access = loma_ir.Var(d_array_id, t=t)
+                while ptr >= 0:
+                    d_array_access = loma_ir.ArrayAccess(d_array_access, indexes[ptr])
+                    ptr -= 1
+            return d_array_access
+
+        elif isinstance(lhs, loma_ir.StructAccess):
+            # struct.x.y.z => dstruct.x.y.z
+            # get id
+            members = []
+            types = []
+            ptr = 0
+            child = lhs.struct
+            members.append(lhs.member_id)
+            types.append(lhs.t)
+            while isinstance(child, loma_ir.StructAccess):
+                members.append(child.member_id)
+                ptr += 1
+                child = child.struct
+                types.append(child.t)
+            id = child.id
+            if id in adjoint_id_dict.keys():
+                # which means the variable requires grad
+                d_struct_id = adjoint_id_dict[id]
+                d_struct_access = loma_ir.Var(d_struct_id)
+                while ptr >= 0:
+                    d_struct_access = loma_ir.StructAccess(d_struct_access, members[ptr], t=types[ptr])
+                    ptr -= 1
+
+            return d_struct_access
+
     # A utility class that you can use for HW3.
     # This mutator normalizes each call expression into
     # f(x0, x1, ...)
@@ -241,6 +366,9 @@ def reverse_diff(diff_func_id : str,
             self.overwrite_dict = {}
             self.adjoint_id_dict = {}
             self.output_args = []
+            self.tmp_adjoint_var_names = []
+            self.tmp_adjoint_var_cnt = 0
+            self.tmp_adjoint_var_decl_code = []
         def mutate_function_def(self, node):
             for arg in node.args:
                 if arg.i == loma_ir.Out():
@@ -305,7 +433,11 @@ def reverse_diff(diff_func_id : str,
             # Advance stack pointer
             res.append(loma_ir.Assign(loma_ir.Var(stack_ptr_name),
                                       loma_ir.BinaryOp(loma_ir.Add(), loma_ir.Var(stack_ptr_name), loma_ir.ConstInt(1))))
-
+            # Assist to declare tmp adjoint variable used in Adjoint Period
+            tmp_var_name = f"_tmp_adjoint_var_{self.tmp_adjoint_var_cnt}_{random_id_generator()}"
+            self.tmp_adjoint_var_names.append(tmp_var_name)
+            self.tmp_adjoint_var_decl_code.append(loma_ir.Declare(tmp_var_name, t=target_type))
+            self.tmp_adjoint_var_cnt += 1
             return res
 
         def mutate_expr(self, node):
@@ -369,6 +501,11 @@ def reverse_diff(diff_func_id : str,
                 d_return = loma_ir.Arg(id=d_return_id, t=loma_ir.Float(), i=loma_ir.In())
                 new_args.append(d_return)
                 self.adjoint = loma_ir.Var(d_return_id)
+            elif isinstance(node.ret_type, loma_ir.Struct):
+                d_return_id = f"_dreturn_{random_id_generator()}"
+                d_return = loma_ir.Arg(id=d_return_id, t=node.ret_type, i=loma_ir.In())
+                new_args.append(d_return)
+                self.adjoint = loma_ir.Var(d_return_id)
             else:
                 raise NotImplementedError("Function ret type which is not float has not been implemented yet")
             self.adjoint_id_dict = adjoint_id_dict
@@ -386,24 +523,19 @@ def reverse_diff(diff_func_id : str,
             # Declare the overwriting stack
             overwrite_dict = primary_mutator.overwrite_dict
             stack_declare_code = []
-            tmp_adjoint_var_num = 0
+            # Tmp variables have been generated in Primary Period
+            self.tmp_adjoint_var_names = primary_mutator.tmp_adjoint_var_names
+            self.tmp_adjoint_var_names.reverse()
+            tmp_adjoint_var_declare_code = primary_mutator.tmp_adjoint_var_decl_code
             for key in overwrite_dict.keys():
+                type = overwrite_dict[key]['type']
                 declare_stmt = loma_ir.Declare(f"_tmp_stack_{key}", \
-                                               t=loma_ir.Array(t=overwrite_dict[key]['type'],
+                                               t=loma_ir.Array(t=type,
                                                                static_size=overwrite_dict[key]['count']))
                 declare_ptr_stmt = loma_ir.Declare(f"_stack_ptr_{key}", t=loma_ir.Int())
                 stack_declare_code.append(declare_stmt)
                 stack_declare_code.append(declare_ptr_stmt)
-                tmp_adjoint_var_num += overwrite_dict[key]['count']
-            # Declare the tmp variables to store _dz
-            self.tmp_adjoint_var_names = []
-            tmp_adjoint_var_declare_code = []
-            for i in range(tmp_adjoint_var_num):
-                tmp_var_name = f"_tmp_adjoint_var_{i}_{random_id_generator()}"
-                self.tmp_adjoint_var_names.append(tmp_var_name)
-                # FIXME: deal with struct and array types
-                tmp_adjoint_var_declare_code.append(loma_ir.Declare(tmp_var_name, t=loma_ir.Float()))
-
+                # Declare the tmp variables to store _dz
             # Reverse mode: We have to visit the stmts reversely
             new_body = [self.mutate_stmt(stmt) for stmt in reversed(node.body)]
 
@@ -459,32 +591,7 @@ def reverse_diff(diff_func_id : str,
             res = []
             # deal with output variable
             if check_lhs_is_output_arg(node.target, self.output_args):
-                if isinstance(node.target, loma_ir.Var):
-                    id = node.target.id
-                    self.adjoint = loma_ir.Var(self.adjoint_id_dict[id])
-                elif isinstance(node.target, loma_ir.ArrayAccess):
-                    # get id
-                    indexes = []
-                    ptr = 0
-                    child = node.target.array
-                    indexes.append(node.target.index)
-                    while isinstance(child, loma_ir.ArrayAccess):
-                        indexes.append(child.index)
-                        ptr += 1
-                        child = child.array
-                    id = child.id
-                    if id in self.adjoint_id_dict.keys():
-                        # which means the variable requires grad
-                        d_array_id = self.adjoint_id_dict[id]
-                        d_array_access = loma_ir.Var(d_array_id)
-                        while ptr >= 0:
-                            d_array_access = loma_ir.ArrayAccess(d_array_access, indexes[ptr])
-                            ptr -= 1
-                    self.adjoint = d_array_access
-
-                elif isinstance(node.target, loma_ir.StructAccess):
-                    raise NotImplementedError("StructAccess as lvalue of Assign has not been implemented yet")
-                    id = node.target.struct.id
+                self.adjoint = get_lhs_adjoint_var(node.target, self.adjoint_id_dict)
                 res += self.mutate_expr(node.val)
                 return res
             # Pop the old value
@@ -498,19 +605,14 @@ def reverse_diff(diff_func_id : str,
             res.append(loma_ir.Assign(target=node.target, val=stack_pop_stmt))
 
             # back_propagate carefully
-            # FIXME: array and struct support
-            if isinstance(node.target, loma_ir.Var):
-                id = node.target.id
-            elif isinstance(node.target, loma_ir.ArrayAccess):
-                id = node.target.array.id
-            elif isinstance(node.target, loma_ir.StructAccess):
-                id = node.target.struct.id
-            self.adjoint = loma_ir.Var(self.adjoint_id_dict[id])
-            self.overwrite_id = id
+            self.adjoint = get_lhs_adjoint_var(node.target, self.adjoint_id_dict)
+
+            # get overwrite_id
+            self.overwrite_id = get_lhs_unique_id(node.target)
             res += self.mutate_expr(node.val)
 
             # Update adjoint
-            res.append(loma_ir.Assign(loma_ir.Var(self.adjoint_id_dict[id]), loma_ir.Var(self.tmp_adjoint_var_names[self.overwrite_cnt])))
+            res.append(accum_deriv(get_lhs_adjoint_var(node.target, self.adjoint_id_dict), loma_ir.Var(self.tmp_adjoint_var_names[self.overwrite_cnt]), overwrite=True))
             self.overwrite_cnt += 1
             # Destroy the overwrite_id class val since it should not have a value when the stmt is not Assign
             self.overwrite_id = None
@@ -547,15 +649,25 @@ def reverse_diff(diff_func_id : str,
                 # which means the variable requires grad
                 d_var_id = self.adjoint_id_dict[node.id]
                 # Deal with overwrite properly:
-                if self.overwrite_id is not None and node.id == self.overwrite_id:
+                test_id = get_lhs_unique_id(node)
+                if self.overwrite_id is not None and test_id == self.overwrite_id:
                     d_var_id = self.tmp_adjoint_var_names[self.overwrite_cnt]
-                d_var_update = loma_ir.Assign(target=loma_ir.Var(d_var_id), val=loma_ir.BinaryOp(loma_ir.Add(), loma_ir.Var(d_var_id), self.adjoint))
-            return [d_var_update]
+                d_var_update_list = accum_deriv(loma_ir.Var(d_var_id, t=node.t), self.adjoint, overwrite=False)
+                return d_var_update_list
+            else:
+                assert False
 
         def mutate_array_access(self, node):
             # HW2:
             # array[index][index2]..[indexN] => _d_array[index][index][index2]..[indexN]
             # get id
+            test_id = get_lhs_unique_id(node)
+            if self.overwrite_id is not None and test_id == self.overwrite_id:
+                d_var_update = loma_ir.Assign(target=self.tmp_adjoint_var_names[self.overwrite_cnt],
+                                              val=loma_ir.BinaryOp(loma_ir.Add(),
+                                                                   self.tmp_adjoint_var_names[self.overwrite_cnt],
+                                                                   self.adjoint))
+                return [d_var_update]
             indexes = []
             ptr = 0
             child = node.array
@@ -579,8 +691,35 @@ def reverse_diff(diff_func_id : str,
             return [d_var_update]
 
         def mutate_struct_access(self, node):
-            # HW2: TODO
-            return super().mutate_struct_access(node)
+            # HW2:
+            # struct.x.y.z => dstruct.x.y.z
+            # get id
+            test_id = get_lhs_unique_id(node)
+            if self.overwrite_id is not None and test_id == self.overwrite_id:
+                d_var_update = loma_ir.Assign(target=loma_ir.Var(self.tmp_adjoint_var_names[self.overwrite_cnt]),
+                                              val=loma_ir.BinaryOp(loma_ir.Add(), loma_ir.Var(self.tmp_adjoint_var_names[self.overwrite_cnt]), self.adjoint))
+                return [d_var_update]
+            members = []
+            ptr = 0
+            child = node.struct
+            members.append(node.member_id)
+            while isinstance(child, loma_ir.StructAccess):
+                members.append(child.member_id)
+                ptr += 1
+                child = child.struct
+            id = child.id
+            if id in self.adjoint_id_dict.keys():
+                # which means the variable requires grad
+                d_struct_id = self.adjoint_id_dict[id]
+                d_struct_access = loma_ir.Var(d_struct_id)
+                while ptr >= 0:
+                    d_struct_access = loma_ir.StructAccess(d_struct_access, members[ptr])
+                    ptr -= 1
+                d_var_update = loma_ir.Assign(target=d_struct_access,
+                                              val=loma_ir.BinaryOp(loma_ir.Add(), d_struct_access, self.adjoint))
+            else:
+                raise AssertionError
+            return [d_var_update]
 
         def mutate_add(self, node):
             # HW2:
