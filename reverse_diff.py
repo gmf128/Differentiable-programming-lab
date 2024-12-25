@@ -680,7 +680,7 @@ def reverse_diff(diff_func_id : str,
             res += self.mutate_expr(node.val)
 
             # Update adjoint
-            res.append(accum_deriv(get_lhs_adjoint_var(node.target, self.adjoint_id_dict), loma_ir.Var(self.tmp_adjoint_var_names[self.overwrite_cnt]), overwrite=True))
+            res += accum_deriv(get_lhs_adjoint_var(node.target, self.adjoint_id_dict), loma_ir.Var(self.tmp_adjoint_var_names[self.overwrite_cnt]), overwrite=True)
             self.overwrite_cnt += 1
             # Destroy the overwrite_id class val since it should not have a value when the stmt is not Assign
             self.overwrite_id = None
@@ -939,8 +939,29 @@ def reverse_diff(diff_func_id : str,
                     self.adjoint = loma_ir.ConstFloat(0.0)
                     res += [self.mutate_expr(arg) for arg in node.args]
                     self.adjoint = tmp_adjoint
+
                 case _:
-                    raise NotImplementedError(f"{func_id} is not implemented yet")
+                    # Not terminal functions
+                    # HW3:
+                    # Get arg types IN or OUT
+                    primary_func_def = funcs[func_id]
+                    assert isinstance(primary_func_def, loma_ir.FunctionDef)
+                    diff_args = []
+                    for i in range(len(node.args)):
+                        arg = node.args[i]
+                        arg_def = primary_func_def.args[i]
+                        if arg_def.i == loma_ir.In():
+                            diff_args.append(arg)
+                            diff_args.append(get_lhs_adjoint_var(arg, self.adjoint_id_dict))
+                        else:
+                            raise NotImplementedError
+                    # add d_return
+                    diff_args.append(self.adjoint)
+                    # Call the differential function
+                    diff_func_id = f"_d_rev_{func_id}"
+                    diff_call = loma_ir.Call(diff_func_id, diff_args)
+                    # Here, we must return a call stmt instead of a call expression, why?
+                    res.append(loma_ir.CallStmt(call=diff_call))
 
             return res
 
