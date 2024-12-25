@@ -30,14 +30,14 @@ def terminal_func_calls(func_id):
         val = loma_ir.Call('sin', [x])
         dval = loma_ir.BinaryOp(loma_ir.Mul(), dx, loma_ir.Call('cos', [x]))
         # return loma_ir.Call('make__dfloat', [val, dval])
-        return (val, dval)
+        return [val, dval]
     def Dcos(input):
         input_x = input[0]
         x = loma_ir.StructAccess(input_x, 'val')
         dx = loma_ir.StructAccess(input_x, 'dval')
         val = loma_ir.Call('cos', [x])
         dval = loma_ir.BinaryOp(loma_ir.Mul(), dx, loma_ir.BinaryOp(loma_ir.Sub(), loma_ir.ConstFloat(0.0), loma_ir.Call('sin', [x])))
-        return (val, dval)
+        return [val, dval]
 
     def Dpow(input):
         input_x = input[0]
@@ -51,7 +51,7 @@ def terminal_func_calls(func_id):
         logx = loma_ir.Call('log', [x])
         partial_y = loma_ir.BinaryOp(loma_ir.Mul(), dy, loma_ir.BinaryOp(loma_ir.Mul(), logx, val))
         dval = loma_ir.BinaryOp(loma_ir.Add(), partial_x, partial_y)
-        return (val, dval)
+        return [val, dval]
 
     def Dlog(input):
         input_x = input[0]
@@ -59,7 +59,7 @@ def terminal_func_calls(func_id):
         dx = loma_ir.StructAccess(input_x, 'dval')
         val = loma_ir.Call('log', [x])
         dval = loma_ir.BinaryOp(loma_ir.Div(), dx, x)
-        return (val, dval)
+        return [val, dval]
 
     def Dexp(input):
         input_x = input[0]
@@ -67,7 +67,7 @@ def terminal_func_calls(func_id):
         dx = loma_ir.StructAccess(input_x, 'dval')
         val = loma_ir.Call('exp', [x])
         dval = loma_ir.BinaryOp(loma_ir.Mul(), dx, val)
-        return (val, dval)
+        return [val, dval]
 
     def Dsqrt(input):
         input_x = input[0]
@@ -75,19 +75,19 @@ def terminal_func_calls(func_id):
         dx = loma_ir.StructAccess(input_x, 'dval')
         val = loma_ir.Call('sqrt', [x])
         dval = loma_ir.BinaryOp(loma_ir.Div(), dx, loma_ir.BinaryOp(loma_ir.Mul(), loma_ir.ConstFloat(2.0), val))
-        return (val, dval)
+        return [val, dval]
 
     def Dfloat2int(input):
         x = input
         val = loma_ir.Call('float2int',[x], t=loma_ir.Int())
         dval = loma_ir.ConstFloat(0.0)
-        return (val, dval)
+        return [val, dval]
 
     def Dint2float(input):
         x = input
         val = loma_ir.Call('int2float',[x], t=loma_ir.Float())
         dval = loma_ir.ConstFloat(0.0)
-        return (val, dval)
+        return [val, dval]
 
     dfunc_dict = {}
     dfunc_dict['sin'] = Dsin
@@ -100,7 +100,7 @@ def terminal_func_calls(func_id):
     dfunc_dict['int2float'] = Dint2float
 
     if func_id not in dfunc_dict.keys():
-        raise NotImplementedError
+        return None
 
     return dfunc_dict[func_id]
 
@@ -274,12 +274,12 @@ def forward_diff(diff_func_id : str,
         def mutate_const_float(self, node):
             # HW1:
             # (val, 0)
-            return (node, loma_ir.ConstFloat(0.0))
+            return [node, loma_ir.ConstFloat(0.0)]
 
         def mutate_const_int(self, node):
             # HW1:
             # (val, 0)
-            return (node, loma_ir.ConstFloat(0.0))
+            return [node, loma_ir.ConstFloat(0.0)]
 
         def mutate_var(self, node):
             # HW1:
@@ -287,24 +287,24 @@ def forward_diff(diff_func_id : str,
             match node.t:
                 # for integers, return (int, 0)
                 case loma_ir.Int():
-                    return (node, loma_ir.ConstFloat(0.0))
+                    return [node, loma_ir.ConstFloat(0.0)]
                 # for arrays, no nothing
                 case loma_ir.Array():
-                    return (node, None)
+                    return [node, None]
                 case loma_ir.Float():
                     val = loma_ir.StructAccess(node, 'val', lineno=node.lineno)
                     dval = loma_ir.StructAccess(node, 'dval', lineno=node.lineno)
-                    return (val, dval)
+                    return [val, dval]
                 case _:
-                    return (node, None)
+                    return [node, None]
 
         def mutate_array_access(self, node):
             # HW1:
             match node.t:
                 case loma_ir.Int():
-                    return (loma_ir.ArrayAccess(self.mutate_expr(node.array)[0], self.mutate_expr(node.index)[0],
+                    return [loma_ir.ArrayAccess(self.mutate_expr(node.array)[0], self.mutate_expr(node.index)[0],
                                                lineno=node.lineno, t=node.t),
-                            loma_ir.ConstFloat(0.0))
+                            loma_ir.ConstFloat(0.0)]
                 case loma_ir.Float():
                     item = loma_ir.ArrayAccess( \
                         self.mutate_expr(node.array)[0],
@@ -313,12 +313,12 @@ def forward_diff(diff_func_id : str,
                         t=loma_to_diff_type(node.t, diff_structs))
                     val = loma_ir.StructAccess(item, 'val', lineno=node.lineno)
                     dval = loma_ir.StructAccess(item, 'dval', lineno=node.lineno)
-                    return (val, dval)
+                    return [val, dval]
                 case _:
-                    return (node, None)
+                    return [node, None]
 
         def mutate_struct_access(self, node):
-            # HW1: TODO
+            # HW1:
             item = loma_ir.StructAccess( \
                 self.mutate_expr(node.struct)[0],
                 node.member_id,
@@ -331,11 +331,11 @@ def forward_diff(diff_func_id : str,
                     if item.t.id == '_dfloat':
                         val = loma_ir.StructAccess(item, 'val', lineno=node.lineno)
                         dval = loma_ir.StructAccess(item, 'dval', lineno=node.lineno)
-                        return (val, dval)
+                        return [val, dval]
                     else:
-                        return (item, None)
+                        return [item, None]
                 case _:
-                    return (item, None)
+                    return [item, None]
 
 
         def mutate_add(self, node):
@@ -355,7 +355,7 @@ def forward_diff(diff_func_id : str,
                 ydval,
                 lineno=node.lineno,
                 )
-            return (val, dval)
+            return [val, dval]
 
         def mutate_sub(self, node):
             # HW1:
@@ -374,7 +374,12 @@ def forward_diff(diff_func_id : str,
                 ydval,
                 lineno=node.lineno,
             )
-            return (val, dval)
+            return [val, dval]
+
+        def mutate_call_stmt(self, node):
+            return loma_ir.CallStmt( \
+                self.mutate_expr(node.call)[0],
+                lineno=node.lineno)
 
         def mutate_mul(self, node):
             # HW1:
@@ -405,7 +410,7 @@ def forward_diff(diff_func_id : str,
                 ydx,
                 lineno=node.lineno,
             )
-            return (val, dval)
+            return [val, dval]
 
         def mutate_div(self, node):
             # HW1:
@@ -442,27 +447,53 @@ def forward_diff(diff_func_id : str,
                 y_sqr,
                 lineno=node.lineno,
             )
-            return (val, dval)
+            return [val, dval]
 
         def mutate_call(self, node):
             # HW1:
             # before: y = f(x)
             # after: (y.val, y.dval) = Df(x.val, x.dval);
             func_id = node.id
-            diff_func = terminal_func_calls(func_id)
-            match func_id:
-                case "int2float":
-                    val, dval = self.mutate_expr(node.args[0])
-                    return diff_func(val)
-                case "float2int":
-                    val, dval = self.mutate_expr(node.args[0])
-                    return diff_func(val)
-                case _:
-                    def mutate_arg(arg):
-                        val, dval = self.mutate_expr(arg)
-                        return loma_ir.Call("make__dfloat", [val, dval])
-                    diff_args = [mutate_arg(arg) for arg in node.args]
-                    return diff_func(diff_args)
+            def mutate_arg(arg):
+                val, dval = self.mutate_expr(arg)
+                return loma_ir.Call("make__dfloat", [val, dval])
+            if terminal_func_calls(func_id) is not None:
+                # Terminal functions
+                diff_func = terminal_func_calls(func_id)
+                match func_id:
+                    case "int2float":
+                        val, dval = self.mutate_expr(node.args[0])
+                        return diff_func(val)
+                    case "float2int":
+                        val, dval = self.mutate_expr(node.args[0])
+                        return diff_func(val)
+                    case _:
+                        diff_args = [mutate_arg(arg) for arg in node.args]
+                        return diff_func(diff_args)
+            else:
+                # Get arg types IN or OUT
+                primary_func_def = funcs[func_id]
+                assert isinstance(primary_func_def, loma_ir.FunctionDef)
+                diff_args = []
+                for i in range(len(node.args)):
+                    arg = node.args[i]
+                    arg_def = primary_func_def.args[i]
+                    if arg_def.i == loma_ir.In():
+                        diff_args.append(mutate_arg(arg))
+                    else:
+                        diff_args.append(arg)
+
+                # Call the differential function
+                diff_func_id = f"_d_fwd_{func_id}"
+                ret_type = primary_func_def.ret_type
+                match ret_type:
+                    case loma_ir.Float():
+                        dfloat_ret = loma_ir.Call(diff_func_id, args=diff_args, lineno=node.lineno)
+                        return [loma_ir.StructAccess(struct=dfloat_ret, member_id='val'), loma_ir.StructAccess(struct=dfloat_ret, member_id='dval')]
+                    case None:
+                        return [loma_ir.Call(diff_func_id, args=diff_args, lineno=node.lineno),]
+                    case _:
+                        raise NotImplementedError
 
         def mutate_less(self, node):
             lval, ldval = self.mutate_expr(node.left)
