@@ -254,8 +254,18 @@ def forward_diff(diff_func_id : str,
             return loma_ir.Assign(target, ret_val, lineno=node.lineno)
 
         def mutate_ifelse(self, node):
-            # HW3: TODO
-            return super().mutate_ifelse(node)
+            # HW3:
+            new_cond = self.mutate_expr(node.cond)[0]
+            new_then_stmts = [self.mutate_stmt(stmt) for stmt in node.then_stmts]
+            new_else_stmts = [self.mutate_stmt(stmt) for stmt in node.else_stmts]
+            # Important: mutate_stmt can return a list of statements. We need to flatten the lists.
+            new_then_stmts = irmutator.flatten(new_then_stmts)
+            new_else_stmts = irmutator.flatten(new_else_stmts)
+            return loma_ir.IfElse( \
+                new_cond,
+                new_then_stmts,
+                new_else_stmts,
+                lineno=node.lineno)
 
         def mutate_while(self, node):
             # HW3: TODO
@@ -453,5 +463,36 @@ def forward_diff(diff_func_id : str,
                         return loma_ir.Call("make__dfloat", [val, dval])
                     diff_args = [mutate_arg(arg) for arg in node.args]
                     return diff_func(diff_args)
+
+        def mutate_less(self, node):
+            lval, ldval = self.mutate_expr(node.left)
+            rval, rdval = self.mutate_expr(node.right)
+            return [loma_ir.BinaryOp(loma_ir.Less(), lval, rval, lineno=node.lineno), ]
+
+        def mutate_less_equal(self, node):
+            lval, ldval = self.mutate_expr(node.left)
+            rval, rdval = self.mutate_expr(node.right)
+            return [loma_ir.BinaryOp(loma_ir.LessEqual(), lval, rval, lineno=node.lineno), ]
+
+        def mutate_greater(self, node):
+            lval, ldval = self.mutate_expr(node.left)
+            rval, rdval = self.mutate_expr(node.right)
+            return [loma_ir.BinaryOp(loma_ir.Greater(), lval, rval, lineno=node.lineno), ]
+
+        def mutate_greater_equal(self, node):
+            lval, ldval = self.mutate_expr(node.left)
+            rval, rdval = self.mutate_expr(node.right)
+            return [loma_ir.BinaryOp(loma_ir.GreaterEqual(), lval, rval, lineno=node.lineno), ]
+
+        def mutate_equal(self, node):
+            lval, ldval = self.mutate_expr(node.left)
+            rval, rdval = self.mutate_expr(node.right)
+            return [loma_ir.BinaryOp(loma_ir.Equal(), lval, rval, lineno=node.lineno), ]
+
+        def mutate_and(self, node):
+            return super().mutate_and(node)
+
+        def mutate_or(self, node):
+            return super().mutate_or(node)
 
     return FwdDiffMutator().mutate_function_def(func)

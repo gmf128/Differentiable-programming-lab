@@ -394,6 +394,8 @@ def reverse_diff(diff_func_id : str,
                     return self.mutate_declare(node)
                 case loma_ir.Assign():
                     return self.mutate_assign(node)
+                case loma_ir.IfElse():
+                    return self.mutate_ifelse(node)
                 case _:
                     assert False, f'Visitor error: unhandled statement {node}'
 
@@ -417,7 +419,7 @@ def reverse_diff(diff_func_id : str,
                 return []
             # stack name: _tmp_stack_{typename}
             # stack ptr: _stack_ptr_{typename}
-            target_type = self.mutate_expr(node.target)
+            target_type = self.get_left_expression_type(node.target)
             type_name = type_to_string(target_type)
             stack_name = f"_tmp_stack_{type_name}"
             stack_ptr_name = f"_stack_ptr_{type_name}"
@@ -440,7 +442,7 @@ def reverse_diff(diff_func_id : str,
             self.tmp_adjoint_var_cnt += 1
             return res
 
-        def mutate_expr(self, node):
+        def get_left_expression_type(self, node):
             match node:
                 case loma_ir.Var():
                     return node.t
@@ -458,6 +460,21 @@ def reverse_diff(diff_func_id : str,
                     raise AssertionError("Function call cannot be lvalue")
                 case _:
                     assert False, f'Visitor error: unhandled expression {node}'
+        def mutate_expr(self, node):
+            return super().mutate_expr(node)
+
+        def mutate_ifelse(self, node):
+            new_cond = self.mutate_expr(node.cond)
+            new_then_stmts = [self.mutate_stmt(stmt) for stmt in node.then_stmts]
+            new_else_stmts = [self.mutate_stmt(stmt) for stmt in node.else_stmts]
+            # Important: mutate_stmt can return a list of statements. We need to flatten the lists.
+            new_then_stmts = irmutator.flatten(new_then_stmts)
+            new_else_stmts = irmutator.flatten(new_else_stmts)
+            return loma_ir.IfElse( \
+                new_cond,
+                new_then_stmts,
+                new_else_stmts,
+                lineno=node.lineno)
 
     class RevDiffMutator(irmutator.IRMutator):
         def __init__(self):
@@ -595,7 +612,7 @@ def reverse_diff(diff_func_id : str,
                 res += self.mutate_expr(node.val)
                 return res
             # Pop the old value
-            target_type = self.primary_mutator.mutate_expr(node.target)
+            target_type = self.primary_mutator.get_left_expression_type(node.target)
             id = type_to_string(target_type)
             # Don`t forget to update stack ptr
             res.append(loma_ir.Assign(loma_ir.Var(f"_stack_ptr_{id}"),
@@ -620,8 +637,16 @@ def reverse_diff(diff_func_id : str,
             return res
 
         def mutate_ifelse(self, node):
-            # HW3: TODO
-            return super().mutate_ifelse(node)
+            new_then_stmts = [self.mutate_stmt(stmt) for stmt in node.then_stmts]
+            new_else_stmts = [self.mutate_stmt(stmt) for stmt in node.else_stmts]
+            # Important: mutate_stmt can return a list of statements. We need to flatten the lists.
+            new_then_stmts = irmutator.flatten(new_then_stmts)
+            new_else_stmts = irmutator.flatten(new_else_stmts)
+            return [loma_ir.IfElse( \
+                node.cond,
+                new_then_stmts,
+                new_else_stmts,
+                lineno=node.lineno)]
 
         def mutate_call_stmt(self, node):
             # HW3: TODO
