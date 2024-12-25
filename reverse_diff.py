@@ -334,7 +334,7 @@ def reverse_diff(diff_func_id : str,
             call = self.mutate_expr(node.call)
             return self.tmp_assign_stmts + [loma_ir.CallStmt(\
                 call,
-                lineno = node.lineno)]
+                lineno=node.lineno)]
 
         def mutate_call(self, node):
             self.has_call_expr = True
@@ -386,6 +386,51 @@ def reverse_diff(diff_func_id : str,
             self.adjoint_id_dict[id] = adjoint_id
             res.append(loma_ir.Declare(adjoint_id, t=node.t))
             return res
+
+        def mutate_call_stmt(self, node):
+            res = []
+            # Deal with side effects
+            # For example: def foo(x: In[float], y:Out[float]) ...
+            # foo(x, y): indicates that the value of y will be changed after call stmt, so we have to use stack to store the previous value of y
+            assert isinstance(node.call, loma_ir.Call)
+            call = node.call
+            func_id = call.id
+            # Get arg types IN or OUT
+            primary_func_def = funcs[func_id]
+            assert isinstance(primary_func_def, loma_ir.FunctionDef)
+            new_primary_args = []
+            for i in range(len(call.args)):
+                arg = call.args[i]
+                arg_def = primary_func_def.args[i]
+                if arg_def.i == loma_ir.Out():
+                    # PUSH into the stack
+                    # stack name: _tmp_stack_{typename}
+                    # stack ptr: _stack_ptr_{typename}
+                    target_type = self.get_left_expression_type(arg)
+                    type_name = type_to_string(target_type)
+                    stack_name = f"_tmp_stack_{type_name}"
+                    stack_ptr_name = f"_stack_ptr_{type_name}"
+                    if type_name in self.overwrite_dict.keys():
+                        self.overwrite_dict[type_name]['count'] += 1
+                    else:
+                        self.overwrite_dict[type_name] = {'type': target_type, 'count': 1}
+                    stack_access = loma_ir.ArrayAccess(loma_ir.Var(stack_name), loma_ir.Var(stack_ptr_name),
+                                                       t=target_type)
+                    # Push the target into the stack
+                    res.append(loma_ir.Assign(stack_access, arg))
+                    # Advance stack pointer
+                    res.append(loma_ir.Assign(loma_ir.Var(stack_ptr_name),
+                                              loma_ir.BinaryOp(loma_ir.Add(), loma_ir.Var(stack_ptr_name),
+                                                               loma_ir.ConstInt(1))))
+                    # Assist to declare tmp adjoint variable used in Adjoint Period
+                    tmp_var_name = f"_tmp_adjoint_var_{self.tmp_adjoint_var_cnt}_{random_id_generator()}"
+                    self.tmp_adjoint_var_names.append(tmp_var_name)
+                    self.tmp_adjoint_var_decl_code.append(loma_ir.Declare(tmp_var_name, t=target_type))
+                    self.tmp_adjoint_var_cnt += 1
+
+            # Call the primary function
+            res.append(node)
+            return res
         def mutate_stmt(self, node):
             match node:
                 case loma_ir.Return():
@@ -396,6 +441,8 @@ def reverse_diff(diff_func_id : str,
                     return self.mutate_assign(node)
                 case loma_ir.IfElse():
                     return self.mutate_ifelse(node)
+                case loma_ir.CallStmt():
+                    return self.mutate_call_stmt(node)
                 case _:
                     assert False, f'Visitor error: unhandled statement {node}'
 
@@ -489,6 +536,10 @@ def reverse_diff(diff_func_id : str,
         def mutate_function_def(self, node):
             # HW2:
             # FunctionDef(string id, arg* args, stmt* body, bool is_simd, type? ret_type)
+
+            # First, do function call normalization(append tmp variables, see Homework3 to know why)
+            call_normalize_mutator = CallNormalizeMutator()
+            node = call_normalize_mutator.mutate_function_def(node)
 
             new_args = []
             adjoint_id_dict = {}
@@ -649,8 +700,38 @@ def reverse_diff(diff_func_id : str,
                 lineno=node.lineno)]
 
         def mutate_call_stmt(self, node):
-            # HW3: TODO
-            return super().mutate_call_stmt(node)
+            # HW3:
+            res = []
+            call = node.call
+            func_id = call.id
+            # Get arg types IN or OUT
+            primary_func_def = funcs[func_id]
+            assert isinstance(primary_func_def, loma_ir.FunctionDef)
+            diff_args = []
+            for i in range(len(call.args)):
+                arg = call.args[i]
+                arg_def = primary_func_def.args[i]
+                if arg_def.i == loma_ir.In():
+                    diff_args.append(arg)
+                    diff_args.append(get_lhs_adjoint_var(arg, self.adjoint_id_dict))
+                else:
+                    diff_args.append(get_lhs_adjoint_var(arg, self.adjoint_id_dict))
+                    # Pop the old value
+                    target_type = self.primary_mutator.get_left_expression_type(arg)
+                    id = type_to_string(target_type)
+                    # Don`t forget to update stack ptr
+                    res.append(loma_ir.Assign(loma_ir.Var(f"_stack_ptr_{id}"),
+                                              loma_ir.BinaryOp(loma_ir.Sub(), loma_ir.Var(f"_stack_ptr_{id}"),
+                                                               loma_ir.ConstInt(1))))
+                    stack_pop_stmt = loma_ir.ArrayAccess(loma_ir.Var(f"_tmp_stack_{id}"),
+                                                         loma_ir.Var(f"_stack_ptr_{id}"))
+                    res.append(loma_ir.Assign(target=arg, val=stack_pop_stmt))
+
+            # Call the differential function
+            diff_func_id = f"_d_rev_{func_id}"
+            diff_call = loma_ir.Call(diff_func_id, diff_args)
+            res.append(loma_ir.CallStmt(diff_call))
+            return res
 
         def mutate_while(self, node):
             # HW3: TODO
