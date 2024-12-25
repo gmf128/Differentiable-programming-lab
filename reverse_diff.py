@@ -637,8 +637,8 @@ def reverse_diff(diff_func_id : str,
             return res
 
         def mutate_ifelse(self, node):
-            new_then_stmts = [self.mutate_stmt(stmt) for stmt in node.then_stmts]
-            new_else_stmts = [self.mutate_stmt(stmt) for stmt in node.else_stmts]
+            new_then_stmts = [self.mutate_stmt(stmt) for stmt in reversed(node.then_stmts)]
+            new_else_stmts = [self.mutate_stmt(stmt) for stmt in reversed(node.else_stmts)]
             # Important: mutate_stmt can return a list of statements. We need to flatten the lists.
             new_then_stmts = irmutator.flatten(new_then_stmts)
             new_else_stmts = irmutator.flatten(new_else_stmts)
