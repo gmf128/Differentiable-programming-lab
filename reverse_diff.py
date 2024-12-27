@@ -403,30 +403,33 @@ def reverse_diff(diff_func_id : str,
                 arg = call.args[i]
                 arg_def = primary_func_def.args[i]
                 if arg_def.i == loma_ir.Out():
-                    # PUSH into the stack
-                    # stack name: _tmp_stack_{typename}
-                    # stack ptr: _stack_ptr_{typename}
-                    target_type = self.get_left_expression_type(arg)
-                    type_name = type_to_string(target_type)
-                    stack_name = f"_tmp_stack_{type_name}"
-                    stack_ptr_name = f"_stack_ptr_{type_name}"
-                    if type_name in self.overwrite_dict.keys():
-                        self.overwrite_dict[type_name]['count'] += 1
+                    if check_lhs_is_output_arg(arg, self.output_args):
+                        return []
                     else:
-                        self.overwrite_dict[type_name] = {'type': target_type, 'count': 1}
-                    stack_access = loma_ir.ArrayAccess(loma_ir.Var(stack_name), loma_ir.Var(stack_ptr_name),
-                                                       t=target_type)
-                    # Push the target into the stack
-                    res.append(loma_ir.Assign(stack_access, arg))
-                    # Advance stack pointer
-                    res.append(loma_ir.Assign(loma_ir.Var(stack_ptr_name),
-                                              loma_ir.BinaryOp(loma_ir.Add(), loma_ir.Var(stack_ptr_name),
-                                                               loma_ir.ConstInt(1))))
-                    # Assist to declare tmp adjoint variable used in Adjoint Period
-                    tmp_var_name = f"_tmp_adjoint_var_{self.tmp_adjoint_var_cnt}_{random_id_generator()}"
-                    self.tmp_adjoint_var_names.append(tmp_var_name)
-                    self.tmp_adjoint_var_decl_code.append(loma_ir.Declare(tmp_var_name, t=target_type))
-                    self.tmp_adjoint_var_cnt += 1
+                        # PUSH into the stack
+                        # stack name: _tmp_stack_{typename}
+                        # stack ptr: _stack_ptr_{typename}
+                        target_type = self.get_left_expression_type(arg)
+                        type_name = type_to_string(target_type)
+                        stack_name = f"_tmp_stack_{type_name}"
+                        stack_ptr_name = f"_stack_ptr_{type_name}"
+                        if type_name in self.overwrite_dict.keys():
+                            self.overwrite_dict[type_name]['count'] += 1
+                        else:
+                            self.overwrite_dict[type_name] = {'type': target_type, 'count': 1}
+                        stack_access = loma_ir.ArrayAccess(loma_ir.Var(stack_name), loma_ir.Var(stack_ptr_name),
+                                                           t=target_type)
+                        # Push the target into the stack
+                        res.append(loma_ir.Assign(stack_access, arg))
+                        # Advance stack pointer
+                        res.append(loma_ir.Assign(loma_ir.Var(stack_ptr_name),
+                                                  loma_ir.BinaryOp(loma_ir.Add(), loma_ir.Var(stack_ptr_name),
+                                                                   loma_ir.ConstInt(1))))
+                        # Assist to declare tmp adjoint variable used in Adjoint Period
+                        tmp_var_name = f"_tmp_adjoint_var_{self.tmp_adjoint_var_cnt}_{random_id_generator()}"
+                        self.tmp_adjoint_var_names.append(tmp_var_name)
+                        self.tmp_adjoint_var_decl_code.append(loma_ir.Declare(tmp_var_name, t=target_type))
+                        self.tmp_adjoint_var_cnt += 1
 
             # Call the primary function
             res.append(node)
@@ -708,6 +711,7 @@ def reverse_diff(diff_func_id : str,
             primary_func_def = funcs[func_id]
             assert isinstance(primary_func_def, loma_ir.FunctionDef)
             diff_args = []
+            out_args = []
             for i in range(len(call.args)):
                 arg = call.args[i]
                 arg_def = primary_func_def.args[i]
@@ -717,6 +721,8 @@ def reverse_diff(diff_func_id : str,
                 else:
                     diff_args.append(get_lhs_adjoint_var(arg, self.adjoint_id_dict))
                     # Pop the old value
+                    if check_lhs_is_output_arg(arg, self.output_args):
+                        continue
                     target_type = self.primary_mutator.get_left_expression_type(arg)
                     id = type_to_string(target_type)
                     # Don`t forget to update stack ptr
@@ -726,11 +732,18 @@ def reverse_diff(diff_func_id : str,
                     stack_pop_stmt = loma_ir.ArrayAccess(loma_ir.Var(f"_tmp_stack_{id}"),
                                                          loma_ir.Var(f"_stack_ptr_{id}"))
                     res.append(loma_ir.Assign(target=arg, val=stack_pop_stmt))
+                    out_args.append(arg)
 
             # Call the differential function
             diff_func_id = f"_d_rev_{func_id}"
             diff_call = loma_ir.Call(diff_func_id, diff_args)
             res.append(loma_ir.CallStmt(diff_call))
+
+            # After call stmt, update _d_var and tmp var
+            for arg in out_args:
+                res += accum_deriv(get_lhs_adjoint_var(arg, self.adjoint_id_dict),
+                                   loma_ir.Var(self.tmp_adjoint_var_names[self.overwrite_cnt]), overwrite=True)
+                self.overwrite_cnt += 1
             return res
 
         def mutate_while(self, node):
