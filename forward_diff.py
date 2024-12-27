@@ -268,8 +268,16 @@ def forward_diff(diff_func_id : str,
                 lineno=node.lineno)
 
         def mutate_while(self, node):
-            # HW3: TODO
-            return super().mutate_while(node)
+            # HW3:
+            new_cond = self.mutate_expr(node.cond)[0]
+            new_body = [self.mutate_stmt(stmt) for stmt in node.body]
+            new_body = irmutator.flatten(new_body)
+            return loma_ir.While(
+                new_cond,
+                node.max_iter,
+                new_body,
+                lineno=node.lineno
+            )
 
         def mutate_const_float(self, node):
             # HW1:
