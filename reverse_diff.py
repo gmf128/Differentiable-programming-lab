@@ -277,13 +277,13 @@ def reverse_diff(diff_func_id : str,
 
             new_body = self.tmp_declare_stmts + new_body
 
-            return loma_ir.FunctionDef(\
+            return loma_ir.FunctionDef(
                 node.id, node.args, new_body, node.is_simd, node.ret_type, lineno = node.lineno)
 
         def mutate_return(self, node):
             self.tmp_assign_stmts = []
             val = self.mutate_expr(node.val)
-            return self.tmp_assign_stmts + [loma_ir.Return(\
+            return self.tmp_assign_stmts + [loma_ir.Return(
                 val,
                 lineno = node.lineno)]
 
@@ -292,7 +292,7 @@ def reverse_diff(diff_func_id : str,
             val = None
             if node.val is not None:
                 val = self.mutate_expr(node.val)
-            return self.tmp_assign_stmts + [loma_ir.Declare(\
+            return self.tmp_assign_stmts + [loma_ir.Declare(
                 node.target,
                 node.t,
                 val,
@@ -309,22 +309,22 @@ def reverse_diff(diff_func_id : str,
                 self.tmp_count += 1
                 tmp_name = f'_call_t_{self.tmp_count}_{random_id_generator()}'
                 self.tmp_count += 1
-                self.tmp_declare_stmts.append(loma_ir.Declare(\
+                self.tmp_declare_stmts.append(loma_ir.Declare(
                     tmp_name,
                     target.t,
                     lineno = node.lineno))
                 tmp_var = loma_ir.Var(tmp_name, t = target.t)
-                assign_tmp = loma_ir.Assign(\
+                assign_tmp = loma_ir.Assign(
                     tmp_var,
                     val,
                     lineno = node.lineno)
-                assign_target = loma_ir.Assign(\
+                assign_target = loma_ir.Assign(
                     target,
                     tmp_var,
                     lineno = node.lineno)
                 return self.tmp_assign_stmts + [assign_tmp, assign_target]
             else:
-                return self.tmp_assign_stmts + [loma_ir.Assign(\
+                return self.tmp_assign_stmts + [loma_ir.Assign(
                     target,
                     val,
                     lineno = node.lineno)]
@@ -332,7 +332,7 @@ def reverse_diff(diff_func_id : str,
         def mutate_call_stmt(self, node):
             self.tmp_assign_stmts = []
             call = self.mutate_expr(node.call)
-            return self.tmp_assign_stmts + [loma_ir.CallStmt(\
+            return self.tmp_assign_stmts + [loma_ir.CallStmt(
                 call,
                 lineno=node.lineno)]
 
@@ -346,10 +346,10 @@ def reverse_diff(diff_func_id : str,
                     arg = self.mutate_expr(arg)
                     tmp_name = f'_call_t_{self.tmp_count}_{random_id_generator()}'
                     self.tmp_count += 1
-                    tmp_var = loma_ir.Var(tmp_name, t = arg.t)
-                    self.tmp_declare_stmts.append(loma_ir.Declare(\
+                    tmp_var = loma_ir.Var(tmp_name, t=arg.t)
+                    self.tmp_declare_stmts.append(loma_ir.Declare(
                         tmp_name, arg.t))
-                    self.tmp_assign_stmts.append(loma_ir.Assign(\
+                    self.tmp_assign_stmts.append(loma_ir.Assign(
                         tmp_var, arg))
                     new_args.append(tmp_var)
                 else:
@@ -360,6 +360,71 @@ def reverse_diff(diff_func_id : str,
     # reverse differentiation.
 
     # Apply the differentiation.
+    class LoopTreeNode:
+        def __init__(self, depth, max_iter):
+            self.depth = depth
+            self.children = []
+            self.children_index = -1
+            self.lineage_index = []
+            self.max_iter = max_iter
+            self.total_max_iter = max_iter
+
+        def add_child(self, node):
+            self.children.append(node)
+            self.children_index += 1
+            l = self.lineage_index.copy()
+            l.append(self.children_index)
+            node.lineage_index = l
+            node.total_max_iter *= self.total_max_iter
+
+        def get_children_cnt(self):
+            return self.children_index
+
+        def get_lineage_index(self):
+            index = ""
+            for ind in self.lineage_index:
+                index += str(ind)
+                index += "_"
+            return index
+
+    class LoopTree:
+        def __init__(self):
+            self.root = LoopTreeNode(-1, 1)
+            self.current = self.root
+            self.cur_depth = -1
+
+        def declare_all(self):
+            return self.declare(self.root)
+
+        def declare(self, node):
+            res = []
+            if node.depth == -1:
+                for i in range(0, node.children_index + 1):
+                    loop_var_id = "_loop_counter_"
+                    loop_var_id += node.get_lineage_index()
+                    loop_var_id += str(i)
+                    res.append(loma_ir.Declare(loop_var_id, loma_ir.Int()))
+                    # recursive
+                    res += irmutator.flatten(self.declare(node.children[i]))
+            else:
+                for i in range(0, node.children_index + 1):
+                    loop_var_id = "_loop_counter_"
+                    loop_var_id += node.get_lineage_index()
+                    loop_var_id += str(i)
+                    res.append(loma_ir.Declare(loop_var_id, loma_ir.Array(t=loma_ir.Int(), static_size=node.total_max_iter)))
+                    loop_var_id_tmp = loop_var_id + "_tmp"
+                    loop_var_id_ptr = loop_var_id + "_ptr"
+                    res.append(loma_ir.Declare(loop_var_id_tmp, loma_ir.Int()))
+                    res.append(loma_ir.Declare(loop_var_id_ptr, loma_ir.Int()))
+                    # recursive
+                    res += irmutator.flatten(self.declare(node.children[i]))
+            return res
+
+        def reset(self):
+            self.current = self.root
+            self.cur_depth = -1
+
+
     class PrimalBuildMutator(irmutator.IRMutator):
         def __init__(self):
             super().__init__()
@@ -369,6 +434,7 @@ def reverse_diff(diff_func_id : str,
             self.tmp_adjoint_var_names = []
             self.tmp_adjoint_var_cnt = 0
             self.tmp_adjoint_var_decl_code = []
+            self.loopTree = LoopTree()
         def mutate_function_def(self, node):
             for arg in node.args:
                 if arg.i == loma_ir.Out():
@@ -381,6 +447,8 @@ def reverse_diff(diff_func_id : str,
             # First, we need to generate z as primal code, and declare the adjoint value _dz
             res = []
             res.append(node)  # primal
+            # do not add _d Var if the type is Int
+            #TODO
             id = node.target
             adjoint_id = f"_d{id}_{random_id_generator()}"
             self.adjoint_id_dict[id] = adjoint_id
@@ -414,9 +482,9 @@ def reverse_diff(diff_func_id : str,
                         stack_name = f"_tmp_stack_{type_name}"
                         stack_ptr_name = f"_stack_ptr_{type_name}"
                         if type_name in self.overwrite_dict.keys():
-                            self.overwrite_dict[type_name]['count'] += 1
+                            self.overwrite_dict[type_name]['count'] += self.loopTree.current.total_max_iter
                         else:
-                            self.overwrite_dict[type_name] = {'type': target_type, 'count': 1}
+                            self.overwrite_dict[type_name] = {'type': target_type, 'count': self.loopTree.current.total_max_iter}
                         stack_access = loma_ir.ArrayAccess(loma_ir.Var(stack_name), loma_ir.Var(stack_ptr_name),
                                                            t=target_type)
                         # Push the target into the stack
@@ -446,8 +514,50 @@ def reverse_diff(diff_func_id : str,
                     return self.mutate_ifelse(node)
                 case loma_ir.CallStmt():
                     return self.mutate_call_stmt(node)
+                case loma_ir.While():
+                    return self.mutate_while(node)
                 case _:
                     assert False, f'Visitor error: unhandled statement {node}'
+
+        def mutate_while(self, node):
+            # In primary mode, max_iter and cond have no change
+            res = []
+            new_body = []
+
+            # update loopTree
+            parent = self.loopTree.current
+            self.loopTree.cur_depth += 1
+            this_node = LoopTreeNode(self.loopTree.cur_depth, node.max_iter)
+            self.loopTree.current.add_child(this_node)
+            self.loopTree.current = this_node
+            loop_var_id = "_loop_counter_"
+            tmp_name = parent.get_lineage_index() + str(parent.children_index)
+            loop_var_id += tmp_name if self.loopTree.cur_depth == 0 else (tmp_name + '_tmp')
+            children_cnt = -1
+            for stmt in node.body:
+                if isinstance(stmt, loma_ir.While):
+                    # Initiate tmp loop var
+                    children_cnt += 1
+                    loop_child_var_tmp_id = f"_loop_counter_{this_node.get_lineage_index()}{children_cnt}_tmp"
+                    loop_child_var_stack_id = f"_loop_counter_{this_node.get_lineage_index()}{children_cnt}"
+                    loop_child_var_ptr_id = f"_loop_counter_{this_node.get_lineage_index()}{children_cnt}_ptr"
+                    new_body.append(loma_ir.Assign(loma_ir.Var(loop_child_var_tmp_id), loma_ir.ConstInt(0)))
+                    # Recursion
+                    new_body.append(self.mutate_while(stmt))
+                    # Record
+                    new_body.append(loma_ir.Assign(loma_ir.ArrayAccess(loma_ir.Var(loop_child_var_stack_id), index=loma_ir.Var(loop_child_var_ptr_id)), loma_ir.Var(loop_child_var_tmp_id)))
+                    new_body.append(loma_ir.Assign(loma_ir.Var(loop_child_var_ptr_id), loma_ir.BinaryOp(loma_ir.Add(), loma_ir.Var(loop_child_var_ptr_id), loma_ir.ConstInt(1))))
+                else:
+                    new_body.append(self.mutate_stmt(stmt))
+            new_body.append(loma_ir.Assign(loma_ir.Var(loop_var_id), loma_ir.BinaryOp(loma_ir.Add(), loma_ir.Var(loop_var_id), loma_ir.ConstInt(1))))
+            new_body = irmutator.flatten(new_body)
+            res.append(loma_ir.While(cond=node.cond, max_iter=node.max_iter, body=new_body))
+
+            # return to parent node
+            self.loopTree.current = parent
+            self.loopTree.cur_depth -= 1
+
+            return res
 
         def mutate_assign(self, node):
             # In reverse mode, assign is a rather hard stmt to implement, due to the **side effect**, which means the value of variable is changed
@@ -474,9 +584,9 @@ def reverse_diff(diff_func_id : str,
             stack_name = f"_tmp_stack_{type_name}"
             stack_ptr_name = f"_stack_ptr_{type_name}"
             if type_name in self.overwrite_dict.keys():
-                self.overwrite_dict[type_name]['count'] += 1
+                self.overwrite_dict[type_name]['count'] += self.loopTree.current.total_max_iter
             else:
-                self.overwrite_dict[type_name] = {'type': target_type, 'count': 1}
+                self.overwrite_dict[type_name] = {'type': target_type, 'count': self.loopTree.current.total_max_iter}
             stack_access = loma_ir.ArrayAccess(loma_ir.Var(stack_name), loma_ir.Var(stack_ptr_name), t=target_type)
             # Push the target into the stack
             res.append(loma_ir.Assign(stack_access, node.target))
@@ -536,6 +646,7 @@ def reverse_diff(diff_func_id : str,
             self.overwrite_cnt = 0
             self.primary_mutator = None
             self.output_args = []
+            self.loopTree = None
         def mutate_function_def(self, node):
             # HW2:
             # FunctionDef(string id, arg* args, stmt* body, bool is_simd, type? ret_type)
@@ -607,11 +718,14 @@ def reverse_diff(diff_func_id : str,
                 stack_declare_code.append(declare_stmt)
                 stack_declare_code.append(declare_ptr_stmt)
                 # Declare the tmp variables to store _dz
+            self.loopTree = primary_mutator.loopTree
+            loop_var_declare_code = primary_mutator.loopTree.declare_all()
+            self.loopTree.reset()
             # Reverse mode: We have to visit the stmts reversely
             new_body = [self.mutate_stmt(stmt) for stmt in reversed(node.body)]
 
-            new_body = stack_declare_code + primary_code \
-                       + tmp_adjoint_var_declare_code +irmutator.flatten(new_body)
+            new_body = stack_declare_code + loop_var_declare_code + primary_code \
+                       + tmp_adjoint_var_declare_code + irmutator.flatten(new_body)
 
             self.overwrite_cnt = 0
             new_ret_type = None
@@ -684,6 +798,12 @@ def reverse_diff(diff_func_id : str,
 
             # Update adjoint
             res += accum_deriv(get_lhs_adjoint_var(node.target, self.adjoint_id_dict), loma_ir.Var(self.tmp_adjoint_var_names[self.overwrite_cnt]), overwrite=True)
+            if self.loopTree.cur_depth != -1:
+                if isinstance(target_type, loma_ir.Int):
+                    res.append(loma_ir.Assign(loma_ir.Var(self.tmp_adjoint_var_names[self.overwrite_cnt]), loma_ir.ConstInt(0)))
+                else:
+                    res.append(loma_ir.Assign(loma_ir.Var(self.tmp_adjoint_var_names[self.overwrite_cnt]),
+                                              loma_ir.ConstFloat(0.0)))
             self.overwrite_cnt += 1
             # Destroy the overwrite_id class val since it should not have a value when the stmt is not Assign
             self.overwrite_id = None
@@ -747,8 +867,51 @@ def reverse_diff(diff_func_id : str,
             return res
 
         def mutate_while(self, node):
-            # HW3: TODO
-            return super().mutate_while(node)
+            res = []
+            parent = self.loopTree.current
+            this_node = self.loopTree.current.children[self.loopTree.current.children_index]
+            self.loopTree.cur_depth += 1
+
+            loop_var_id = "_loop_counter_"
+            tmp_name = parent.get_lineage_index() + str(self.loopTree.current.children_index)
+            loop_var_id += tmp_name if self.loopTree.cur_depth == 0 else (
+                        tmp_name + '_tmp')
+            new_cond = loma_ir.BinaryOp(loma_ir.Greater(), loma_ir.Var(loop_var_id), loma_ir.ConstInt(0))
+            new_body = []
+            children_cnt = this_node.children_index + 1
+
+            self.loopTree.current = this_node
+
+            for stmt in reversed(node.body):
+                if isinstance(stmt, loma_ir.While):
+                    # Initiate tmp loop var
+                    children_cnt -= 1
+                    loop_child_var_tmp_id = f"_loop_counter_{this_node.get_lineage_index()}{children_cnt}_tmp"
+                    loop_child_var_stack_id = f"_loop_counter_{this_node.get_lineage_index()}{children_cnt}"
+                    loop_child_var_ptr_id = f"_loop_counter_{this_node.get_lineage_index()}{children_cnt}_ptr"
+                    new_body.append(loma_ir.Assign(loma_ir.Var(loop_child_var_ptr_id),
+                                                   loma_ir.BinaryOp(loma_ir.Sub(), loma_ir.Var(loop_child_var_ptr_id),
+                                                                    loma_ir.ConstInt(1))))
+                    new_body.append(loma_ir.Assign(
+                                        loma_ir.Var(loop_child_var_tmp_id),
+                                        loma_ir.ArrayAccess(loma_ir.Var(loop_child_var_stack_id),
+                                                                       index=loma_ir.Var(loop_child_var_ptr_id))))
+                    # Recursion
+                    new_body.append(self.mutate_while(stmt))
+                else:
+                    new_body.append(self.mutate_stmt(stmt))
+
+            new_body.append(loma_ir.Assign(loma_ir.Var(loop_var_id),
+                                           loma_ir.BinaryOp(loma_ir.Sub(), loma_ir.Var(loop_var_id),
+                                                            loma_ir.ConstInt(1))))
+            new_body = irmutator.flatten(new_body)
+            res.append(loma_ir.While(cond=new_cond, max_iter=node.max_iter, body=new_body))
+
+            self.loopTree.current = parent
+            self.loopTree.cur_depth -= 1
+            self.loopTree.current.children_index -= 1
+
+            return res
 
         def mutate_const_float(self, node):
             # HW2:
