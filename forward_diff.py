@@ -463,8 +463,13 @@ def forward_diff(diff_func_id : str,
             # after: (y.val, y.dval) = Df(x.val, x.dval);
             func_id = node.id
             def mutate_arg(arg):
-                val, dval = self.mutate_expr(arg)
-                return loma_ir.Call("make__dfloat", [val, dval])
+                match arg.t:
+                    case loma_ir.Float():
+                        val, dval = self.mutate_expr(arg)
+                        return loma_ir.Call("make__dfloat", [val, dval])
+                    case _:
+                        val, _ = self.mutate_expr(arg)
+                        return val
             if terminal_func_calls(func_id) is not None:
                 # Terminal functions
                 diff_func = terminal_func_calls(func_id)
@@ -500,6 +505,8 @@ def forward_diff(diff_func_id : str,
                         return [loma_ir.StructAccess(struct=dfloat_ret, member_id='val'), loma_ir.StructAccess(struct=dfloat_ret, member_id='dval')]
                     case None:
                         return [loma_ir.Call(diff_func_id, args=diff_args, lineno=node.lineno),]
+                    case loma_ir.Struct():
+                        return [loma_ir.Call(diff_func_id, args=diff_args, lineno=node.lineno), None]
                     case _:
                         raise NotImplementedError
 
