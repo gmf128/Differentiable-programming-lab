@@ -347,8 +347,11 @@ def reverse_diff(diff_func_id : str,
                     tmp_name = f'_call_t_{self.tmp_count}_{random_id_generator()}'
                     self.tmp_count += 1
                     tmp_var = loma_ir.Var(tmp_name, t=arg.t)
-                    self.tmp_declare_stmts.append(loma_ir.Declare(
-                        tmp_name, arg.t))
+                    try:
+                        self.tmp_declare_stmts.append(loma_ir.Declare(
+                            tmp_name, arg.t))
+                    except Exception as e:
+                        print(node)
                     self.tmp_assign_stmts.append(loma_ir.Assign(
                         tmp_var, arg))
                     new_args.append(tmp_var)
@@ -449,6 +452,8 @@ def reverse_diff(diff_func_id : str,
             res.append(node)  # primal
             # do not add _d Var if the type is Int
             #TODO
+            if isinstance(node.t, loma_ir.Int):
+                return res
             id = node.target
             adjoint_id = f"_d{id}_{random_id_generator()}"
             self.adjoint_id_dict[id] = adjoint_id
@@ -494,10 +499,11 @@ def reverse_diff(diff_func_id : str,
                                                   loma_ir.BinaryOp(loma_ir.Add(), loma_ir.Var(stack_ptr_name),
                                                                    loma_ir.ConstInt(1))))
                         # Assist to declare tmp adjoint variable used in Adjoint Period
-                        tmp_var_name = f"_tmp_adjoint_var_{self.tmp_adjoint_var_cnt}_{random_id_generator()}"
-                        self.tmp_adjoint_var_names.append(tmp_var_name)
-                        self.tmp_adjoint_var_decl_code.append(loma_ir.Declare(tmp_var_name, t=target_type))
-                        self.tmp_adjoint_var_cnt += 1
+                        if type_name != "int":
+                            tmp_var_name = f"_tmp_adjoint_var_{self.tmp_adjoint_var_cnt}_{random_id_generator()}"
+                            self.tmp_adjoint_var_names.append(tmp_var_name)
+                            self.tmp_adjoint_var_decl_code.append(loma_ir.Declare(tmp_var_name, t=target_type))
+                            self.tmp_adjoint_var_cnt += 1
 
             # Call the primary function
             res.append(node)
@@ -596,10 +602,11 @@ def reverse_diff(diff_func_id : str,
             res.append(loma_ir.Assign(loma_ir.Var(stack_ptr_name),
                                       loma_ir.BinaryOp(loma_ir.Add(), loma_ir.Var(stack_ptr_name), loma_ir.ConstInt(1))))
             # Assist to declare tmp adjoint variable used in Adjoint Period
-            tmp_var_name = f"_tmp_adjoint_var_{self.tmp_adjoint_var_cnt}_{random_id_generator()}"
-            self.tmp_adjoint_var_names.append(tmp_var_name)
-            self.tmp_adjoint_var_decl_code.append(loma_ir.Declare(tmp_var_name, t=target_type))
-            self.tmp_adjoint_var_cnt += 1
+            if type_name != "int":
+                tmp_var_name = f"_tmp_adjoint_var_{self.tmp_adjoint_var_cnt}_{random_id_generator()}"
+                self.tmp_adjoint_var_names.append(tmp_var_name)
+                self.tmp_adjoint_var_decl_code.append(loma_ir.Declare(tmp_var_name, t=target_type))
+                self.tmp_adjoint_var_cnt += 1
             return res
 
         def get_left_expression_type(self, node):
@@ -753,7 +760,8 @@ def reverse_diff(diff_func_id : str,
             #   x <---
             #         |-- 'f' <-- _dz ---(z=f(x, y))
             #   y <---
-            self.adjoint = loma_ir.Var(self.adjoint_id_dict[node.target])
+            if not isinstance(node.t, loma_ir.Int):
+                self.adjoint = loma_ir.Var(self.adjoint_id_dict[node.target])
             if node.val is None:
                 return []
             return self.mutate_expr(node.val)
@@ -790,6 +798,10 @@ def reverse_diff(diff_func_id : str,
             res.append(loma_ir.Assign(target=node.target, val=stack_pop_stmt))
 
             # back_propagate carefully
+            # if node.target is int, then no need for grad backpropagation
+            if isinstance(node.target.t, loma_ir.Int):
+                return res
+
             self.adjoint = get_lhs_adjoint_var(node.target, self.adjoint_id_dict)
 
             # get overwrite_id
@@ -864,6 +876,7 @@ def reverse_diff(diff_func_id : str,
                 res += accum_deriv(get_lhs_adjoint_var(arg, self.adjoint_id_dict),
                                    loma_ir.Var(self.tmp_adjoint_var_names[self.overwrite_cnt]), overwrite=True)
                 self.overwrite_cnt += 1
+                self.overwrite_id = None
             return res
 
         def mutate_while(self, node):
@@ -937,7 +950,8 @@ def reverse_diff(diff_func_id : str,
                 d_var_update_list = accum_deriv(loma_ir.Var(d_var_id, t=node.t), self.adjoint, overwrite=False)
                 return d_var_update_list
             else:
-                assert False
+                # requires no grad: Int or dispatch
+                return []
 
         def mutate_array_access(self, node):
             # HW2:
