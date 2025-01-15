@@ -646,7 +646,6 @@ def reverse_diff(diff_func_id : str,
     class RevDiffMutator(irmutator.IRMutator):
         def __init__(self):
             super().__init__()
-            self.overwrite_dict = {}
             self.adjoint_id_dict = {}
             self.overwrite_id = None
             self.tmp_adjoint_var_names = None
@@ -823,8 +822,8 @@ def reverse_diff(diff_func_id : str,
             return res
 
         def mutate_ifelse(self, node):
-            new_then_stmts = [self.mutate_stmt(stmt) for stmt in reversed(node.then_stmts)]
             new_else_stmts = [self.mutate_stmt(stmt) for stmt in reversed(node.else_stmts)]
+            new_then_stmts = [self.mutate_stmt(stmt) for stmt in reversed(node.then_stmts)]
             # Important: mutate_stmt can return a list of statements. We need to flatten the lists.
             new_then_stmts = irmutator.flatten(new_then_stmts)
             new_else_stmts = irmutator.flatten(new_else_stmts)
@@ -844,7 +843,8 @@ def reverse_diff(diff_func_id : str,
             assert isinstance(primary_func_def, loma_ir.FunctionDef)
             diff_args = []
             out_args = []
-            for i in range(len(call.args)):
+            n_args = len(node.args)
+            for i in range(n_args):
                 arg = call.args[i]
                 arg_def = primary_func_def.args[i]
                 if arg_def.i == loma_ir.In():
