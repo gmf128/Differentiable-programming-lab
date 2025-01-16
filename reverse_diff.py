@@ -839,7 +839,7 @@ def reverse_diff(diff_func_id : str,
             assert isinstance(primary_func_def, loma_ir.FunctionDef)
             diff_args = []
             out_args = []
-            n_args = len(node.args)
+            n_args = len(primary_func_def.args)
             for i in range(n_args):
                 arg = call.args[i]
                 arg_def = primary_func_def.args[i]
