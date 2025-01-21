@@ -92,9 +92,76 @@ def ray_color_constant(ray : In[Ray], sph:In[Sphere]) -> Vec3:
         ret_color = black
     return ret_color
 
-d_ray_color = rev_diff(ray_color)
 
-def diff_raytrace(w : In[int], h : In[int], dl_dimage : In[Array[Vec3]], radius : In[float]) -> float:
+d_ray_color = rev_diff(ray_color_constant)
+
+def clamp_int(x: In[int], min: In[int], max: In[int]) -> int:
+    if x < min:
+        return min
+    else:
+        if x > max:
+            return max
+        else:
+            return x
+
+def post_process(w: In[int], h: In[int], image: In[Array[Vec3]], output_img: Out[Array[Vec3]]):
+    y: int = 0
+    x: int
+    left: int
+    up: int
+    pixel_center: Vec3
+    intp_x: float
+    intp_y: float
+    intp_z: float
+    while (y < h, max_iter := 4096):
+        x = 0
+        while (x < w, max_iter := 4096):
+            left = clamp_int(x - 1, 0, w)
+            up = clamp_int(y - 1, 0, h)
+            intp_x = 0.25 * (
+                        image[w * y + x].x + image[w * up + x].x + image[w * y + left].x + image[w * up + left].x)
+            intp_y = 0.25 * (
+                        image[w * y + x].y + image[w * up + x].y + image[w * y + left].y + image[w * up + left].y)
+            intp_z = 0.25 * (
+                        image[w * y + x].z + image[w * up + x].z + image[w * y + left].z + image[w * up + left].z)
+            output_img[w * y + x] = make_vec3(intp_x, intp_y, intp_z)
+            x = x + 1
+        y = y + 1
+
+def d_post_process(w: In[int], dw: Out[int], h: In[int], dh: Out[int], image: In[Array[Vec3]], d_image: Out[Array[Vec3]], d_output_img: In[Array[Vec3]]):
+    y: int = 0
+    x: int
+    left: int
+    up: int
+    pixel_center: Vec3
+    intp_x: float
+    intp_y: float
+    intp_z: float
+    while (y < h, max_iter := 4096):
+        x = 0
+        while (x < w, max_iter := 4096):
+            left = clamp_int(x - 1, 0, w)
+            up = clamp_int(y - 1, 0, h)
+            d_image[w * up + x].x = d_image[w * up + x].x + d_output_img[w * y + x].x
+            d_image[w * up + x].y = d_image[w * up + x].y + d_output_img[w * y + x].y
+            d_image[w * up + x].z = d_image[w * up + x].z + d_output_img[w * y + x].z
+            #
+            d_image[w * up + left].x = d_image[w * up + left].x + d_output_img[w * y + x].x
+            d_image[w * up + left].y = d_image[w * up + left].y + d_output_img[w * y + x].y
+            d_image[w * up + left].z = d_image[w * up + left].z + d_output_img[w * y + x].z
+            #
+            d_image[w * y + x].x = d_image[w * y + x].x + d_output_img[w * y + x].x
+            d_image[w * y + x].y = d_image[w * y + x].y + d_output_img[w * y + x].y
+            d_image[w * y + x].z = d_image[w * y + x].z + d_output_img[w * y + x].z
+            #
+            d_image[w * y + left].x = d_image[w * y + left].x + d_output_img[w * y + x].x
+            d_image[w * y + left].y = d_image[w * y + left].y + d_output_img[w * y + x].y
+            d_image[w * y + left].z = d_image[w * y + left].z + d_output_img[w * y + x].z
+            x = x + 1
+        y = y + 1
+
+
+def diff_raytrace(w : In[int], h : In[int], primal_image: In[Array[Vec3]], dl_dimage : In[Array[Vec3]], radius : In[float], dl_dpimage: In[Array[Vec3]]) -> float:
     # Camera setup
     aspect_ratio : float = int2float(w) / int2float(h)
     focal_length : float = 1.0
@@ -127,6 +194,11 @@ def diff_raytrace(w : In[int], h : In[int], dl_dimage : In[Array[Vec3]], radius 
     ray: Ray
     d_ray: Ray
 
+    dw: int
+    dh: int
+
+    d_post_process(w, dw, h, dh, primal_image, dl_dpimage, dl_dimage)
+
     while (y < h, max_iter := 4096):
         x = 0
         while (x < w, max_iter := 4096):
@@ -135,14 +207,16 @@ def diff_raytrace(w : In[int], h : In[int], dl_dimage : In[Array[Vec3]], radius 
             ray.org = make_vec3(camera_center.x, camera_center.y, camera_center.z)
             ray.dir = normalize(sub(pixel_center, camera_center))
 
-            d_ray_color(ray, d_ray, sphere, dl_dsphere,  dl_dimage[w * y + x])
+            d_ray_color(ray, d_ray, sphere, dl_dsphere,  dl_dpimage[w * y + x])
 
             x = x + 1
         y = y + 1
 
     return dl_dsphere.radius
 
-def raytrace(w : In[int], h : In[int], image : Out[Array[Vec3]], radius : In[float]):
+
+
+def raytrace(w : In[int], h : In[int], image : Out[Array[Vec3]], radius : In[float], tmp_img: In[Array[Vec3]]):
     # Camera setup
     aspect_ratio: float = int2float(w) / int2float(h)
     focal_length: float = 1.0
@@ -176,7 +250,8 @@ def raytrace(w : In[int], h : In[int], image : Out[Array[Vec3]], radius : In[flo
             pixel_center = add(add(pixel00_loc, mul(x, pixel_delta_u)), mul(y, pixel_delta_v))
             ray.org = camera_center
             ray.dir = normalize(sub(pixel_center, camera_center))
-            image[w * y + x] = ray_color(ray, sph)
-
+            tmp_img[w * y + x] = ray_color_constant(ray, sph)
             x = x + 1
         y = y + 1
+
+    post_process(w, h, tmp_img, image)
